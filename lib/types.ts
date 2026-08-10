@@ -2,6 +2,8 @@ export type Article = "der" | "die" | "das" | null;
 
 export type MorphemeKind = "prefix" | "root" | "suffix" | "compound";
 
+export type FavoriteType = "meaning" | "article";
+
 export interface Morpheme {
   text: string;
   lookup: string;
@@ -37,6 +39,7 @@ export interface FavoriteWord {
   partOfSpeech?: string | null;
   morphemes?: Morpheme[];
   articleReason?: string | null;
+  favoriteTypes?: FavoriteType[];
 }
 
 export interface GeneratedExercise {

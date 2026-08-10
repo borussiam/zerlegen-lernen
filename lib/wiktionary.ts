@@ -31,10 +31,10 @@ interface WiktionaryRuntimeState {
 }
 
 const globalForWiktionary = globalThis as typeof globalThis & {
-  __zerlegenWiktionaryState?: WiktionaryRuntimeState;
+  __zerlegenWiktionaryStateV2?: WiktionaryRuntimeState;
 };
 
-const runtimeState = globalForWiktionary.__zerlegenWiktionaryState ??= {
+const runtimeState = globalForWiktionary.__zerlegenWiktionaryStateV2 ??= {
   cache: new Map(),
   inFlight: new Map(),
   requestQueue: Promise.resolve(),
@@ -110,14 +110,14 @@ async function requestWiktionary(params: Record<string, string | number>) {
       const apiRateLimited = response.data?.error?.code === "ratelimited";
       if (!apiRateLimited) return response;
       if (attempt === MAX_RATE_LIMIT_RETRIES) {
-        throw new Error("Wiktionary 요청이 많아 잠시 제한되었습니다. 잠시 후 다시 시도해 주세요.");
+        throw new Error("사전 요청이 많아 잠시 제한되었습니다. 잠시 후 다시 시도해 주세요.");
       }
       await delay(1_000 * (2 ** attempt));
     } catch (error) {
       const rateLimited = axios.isAxiosError(error) && error.response?.status === 429;
       if (!rateLimited || attempt === MAX_RATE_LIMIT_RETRIES) {
         if (rateLimited) {
-          throw new Error("Wiktionary 요청이 많아 잠시 제한되었습니다. 잠시 후 다시 시도해 주세요.");
+          throw new Error("사전 요청이 많아 잠시 제한되었습니다. 잠시 후 다시 시도해 주세요.");
         }
         throw error;
       }
@@ -127,7 +127,7 @@ async function requestWiktionary(params: Record<string, string | number>) {
     }
   }
 
-  throw new Error("Wiktionary 요청을 완료하지 못했습니다.");
+  throw new Error("사전 요청을 완료하지 못했습니다.");
 }
 
 function clean(text: string) {
@@ -205,10 +205,10 @@ function getMorphemeKind(term: string): MorphemeKind {
 }
 
 function morphemeMeaning(kind: MorphemeKind) {
-  if (kind === "prefix") return "영어 Wiktionary 어원 링크에서 확인된 접두사입니다.";
-  if (kind === "suffix") return "영어 Wiktionary 어원 링크에서 확인된 접미사입니다.";
-  if (kind === "compound") return "영어 Wiktionary 어원 링크에서 확인된 복합어 구성 요소입니다.";
-  return "영어 Wiktionary 어원 링크에서 확인된 기본형입니다.";
+  if (kind === "prefix") return "현대 독일어 분해식의 접두사입니다.";
+  if (kind === "suffix") return "현대 독일어 분해식의 접미사입니다.";
+  if (kind === "compound") return "현대 독일어 복합어의 구성 요소입니다.";
+  return "현대 독일어 분해식의 기본형입니다.";
 }
 
 const ARTICLE_SUFFIX_RULES: Array<{ endings: string[]; article: Exclude<Article, null>; reason: string }> = [
@@ -233,14 +233,14 @@ function getArticleReason(word: string, article: Article, morphemes: Morpheme[])
     const ending = matchedRule.endings.find((candidate) => (
       explicitSuffixes.includes(candidate) || normalizedWord.endsWith(candidate.slice(1))
     ));
-    return `${ending} 규칙: ${matchedRule.reason} 영어 Wiktionary의 이 항목도 ${article}로 표기합니다.`;
+    return `${ending} 규칙: ${matchedRule.reason}`;
   }
 
   if (morphemes.some((part) => part.kind === "compound")) {
-    return `복합명사는 보통 마지막 기본어(Grundwort)의 성을 따릅니다. 영어 Wiktionary의 이 항목은 ${article}로 표기합니다.`;
+    return "복합명사는 보통 마지막 기본어(Grundwort)의 성을 따릅니다.";
   }
 
-  return `영어 Wiktionary의 독일어 명사 성 표기에 따라 ${article}를 사용합니다. 뚜렷한 생산적 접미사 규칙이 없으면 단어와 관사를 함께 익히는 편이 안전합니다.`;
+  return `뚜렷한 생산적 접미사 규칙이 없으므로 ${article}와 단어를 함께 익히는 편이 안전합니다.`;
 }
 
 function extractModernEtymology($: cheerio.CheerioAPI) {
@@ -358,7 +358,7 @@ export function parseEnglishWiktionaryHtml(word: string, html: string): ParseRes
     .closest(".mw-heading");
 
   if (!germanHeading.length) {
-    throw new Error("영어 Wiktionary에서 독일어 항목을 찾을 수 없습니다.");
+    throw new Error("독일어 사전 항목을 찾을 수 없습니다.");
   }
 
   const germanHtml = germanHeading.nextUntil(".mw-heading2").toString();
@@ -374,7 +374,7 @@ export function parseEnglishWiktionaryHtml(word: string, html: string): ParseRes
         targetUrl: `${WIKTIONARY_ORIGIN}/wiki/${encodeURIComponent(word)}#German`,
         kind: standaloneKind,
         meaning: standaloneKind === "root"
-          ? "Wiktionary에 명시적인 현대 독일어 분해식이 없습니다."
+          ? "명시적인 현대 독일어 분해식이 없습니다."
           : morphemeMeaning(standaloneKind),
       } satisfies Morpheme];
 
@@ -382,7 +382,7 @@ export function parseEnglishWiktionaryHtml(word: string, html: string): ParseRes
     word,
     article,
     partOfSpeech,
-    meanings: meanings.length ? meanings : ["영어 Wiktionary에서 정의를 자동 추출하지 못했습니다."],
+    meanings: meanings.length ? meanings : ["사전에서 정의를 자동 추출하지 못했습니다."],
     examples: examples.length ? examples : [generatedExample(word, partOfSpeech, article)],
     etymology,
     morphemes: resolvedMorphemes,
@@ -406,7 +406,7 @@ async function parseGermanWordUncached(requestedWord: string): Promise<ParseResu
   });
 
   if (queryData.error) {
-    throw new Error(queryData.error.info ?? "영어 Wiktionary에서 단어를 찾을 수 없습니다.");
+    throw new Error(queryData.error.info ?? "독일어 사전에서 단어를 찾을 수 없습니다.");
   }
 
   const pages = (queryData.query?.pages ?? []) as WiktionaryPage[];
@@ -415,7 +415,7 @@ async function parseGermanWordUncached(requestedWord: string): Promise<ParseResu
     .find((item): item is WiktionaryPage => Boolean(item))
     ?? pages.find((item) => !item.missing && item.pageid > 0);
 
-  if (!page) throw new Error("영어 Wiktionary에서 독일어 단어를 찾을 수 없습니다.");
+  if (!page) throw new Error("독일어 사전에서 단어를 찾을 수 없습니다.");
 
   const { data: parseData } = await requestWiktionary({
     action: "parse",
@@ -425,7 +425,7 @@ async function parseGermanWordUncached(requestedWord: string): Promise<ParseResu
   });
 
   if (parseData.error || !parseData.parse?.text?.["*"]) {
-    throw new Error(parseData.error?.info ?? "영어 Wiktionary에서 단어를 불러오지 못했습니다.");
+    throw new Error(parseData.error?.info ?? "독일어 사전에서 단어를 불러오지 못했습니다.");
   }
 
   return parseEnglishWiktionaryHtml(page.title, parseData.parse.text["*"] as string);
