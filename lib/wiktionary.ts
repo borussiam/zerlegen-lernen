@@ -1,6 +1,6 @@
 import axios from "axios";
 import * as cheerio from "cheerio";
-import type { Article, Morpheme, MorphemeKind, ParseResult } from "@/lib/types";
+import type { Article, Morpheme, MorphemeKind, ParseResult, WordExample } from "@/lib/types";
 
 const WIKTIONARY_ORIGIN = "https://en.wiktionary.org";
 const API_URL = `${WIKTIONARY_ORIGIN}/w/api.php`;
@@ -15,10 +15,43 @@ interface WiktionaryPage {
 
 function clean(text: string) {
   return text
-    .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+    .replace(/[\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g, "")
     .replace(/\[[^\]]*]/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function addExample(examples: WordExample[], sentence: string, translation: string | null = null) {
+  const cleanSentence = clean(sentence);
+  const cleanTranslation = translation ? clean(translation) : null;
+  if (!cleanSentence || examples.some((example) => example.sentence === cleanSentence)) return;
+
+  examples.push({
+    sentence: cleanSentence,
+    translation: cleanTranslation || null,
+    source: "wiktionary",
+  });
+}
+
+function generatedExample(word: string, partOfSpeech: string | null, article: Article): WordExample {
+  const normalizedPart = partOfSpeech?.toLowerCase() ?? "";
+  let sentence: string;
+
+  if (normalizedPart.includes("suffix") || (word.startsWith("-") && !word.endsWith("-"))) {
+    sentence = `Das Suffix „${word}“ bildet neue deutsche Wörter.`;
+  } else if (normalizedPart.includes("prefix") || (word.endsWith("-") && !word.startsWith("-"))) {
+    sentence = `Das Präfix „${word}“ steht am Anfang eines deutschen Wortes.`;
+  } else if (normalizedPart.includes("adjective")) {
+    sentence = `Das Beispiel ist ${word}.`;
+  } else if (normalizedPart.includes("verb")) {
+    sentence = `Ich möchte das Verb „${word}“ lernen.`;
+  } else if (article) {
+    sentence = `${article[0].toLocaleUpperCase("de-DE")}${article.slice(1)} ${word} ist in diesem Zusammenhang wichtig.`;
+  } else {
+    sentence = `Das deutsche Wort „${word}“ wird in diesem Beispiel verwendet.`;
+  }
+
+  return { sentence, translation: null, source: "generated" };
 }
 
 function getLinkedPage(href: string) {
@@ -59,6 +92,38 @@ function morphemeMeaning(kind: MorphemeKind) {
   if (kind === "suffix") return "영어 Wiktionary 어원 링크에서 확인된 접미사입니다.";
   if (kind === "compound") return "영어 Wiktionary 어원 링크에서 확인된 복합어 구성 요소입니다.";
   return "영어 Wiktionary 어원 링크에서 확인된 기본형입니다.";
+}
+
+const ARTICLE_SUFFIX_RULES: Array<{ endings: string[]; article: Exclude<Article, null>; reason: string }> = [
+  { endings: ["-ung", "-heit", "-keit", "-schaft", "-ion", "-tät", "-ik", "-ei", "-in"], article: "die", reason: "이 접미사로 끝나는 독일어 명사는 대체로 여성명사입니다." },
+  { endings: ["-chen", "-lein", "-ment", "-um"], article: "das", reason: "이 접미사로 끝나는 독일어 명사는 대체로 중성명사입니다." },
+  { endings: ["-er", "-ling", "-ismus"], article: "der", reason: "이 접미사로 만들어진 사람·행위자 명사는 대체로 남성명사입니다." },
+];
+
+function getArticleReason(word: string, article: Article, morphemes: Morpheme[]) {
+  if (!article) return null;
+
+  const explicitSuffixes = morphemes
+    .filter((part) => part.kind === "suffix")
+    .map((part) => part.lookup.toLocaleLowerCase("de-DE"));
+  const normalizedWord = word.toLocaleLowerCase("de-DE");
+  const matchedRule = ARTICLE_SUFFIX_RULES.find((rule) => (
+    rule.article === article
+    && rule.endings.some((ending) => explicitSuffixes.includes(ending) || normalizedWord.endsWith(ending.slice(1)))
+  ));
+
+  if (matchedRule) {
+    const ending = matchedRule.endings.find((candidate) => (
+      explicitSuffixes.includes(candidate) || normalizedWord.endsWith(candidate.slice(1))
+    ));
+    return `${ending} 규칙: ${matchedRule.reason} 영어 Wiktionary의 이 항목도 ${article}로 표기합니다.`;
+  }
+
+  if (morphemes.some((part) => part.kind === "compound")) {
+    return `복합명사는 보통 마지막 기본어(Grundwort)의 성을 따릅니다. 영어 Wiktionary의 이 항목은 ${article}로 표기합니다.`;
+  }
+
+  return `영어 Wiktionary의 독일어 명사 성 표기에 따라 ${article}를 사용합니다. 뚜렷한 생산적 접미사 규칙이 없으면 단어와 관사를 함께 익히는 편이 안전합니다.`;
 }
 
 function extractModernEtymology($: cheerio.CheerioAPI) {
@@ -126,6 +191,7 @@ function extractModernEtymology($: cheerio.CheerioAPI) {
 
 function extractDefinitions($: cheerio.CheerioAPI) {
   const meanings: string[] = [];
+  const examples: WordExample[] = [];
   let partOfSpeech: string | null = null;
   let article: Article = null;
 
@@ -144,15 +210,27 @@ function extractDefinitions($: cheerio.CheerioAPI) {
     }
 
     contents.filter("ol").first().children("li").each((_, item) => {
+      $(item).find(".h-usage-example").each((__, usageExample) => {
+        if (examples.length >= 3) return;
+        const sentence = $(usageExample).find(".e-example").first().text();
+        const translation = $(usageExample).find(".e-translation").first().text();
+        addExample(examples, sentence, translation);
+      });
+
+      $(item).find(".affixusex").each((__, affixExample) => {
+        if (examples.length >= 3) return;
+        addExample(examples, $(affixExample).text());
+      });
+
       if (meanings.length >= 5) return;
       const definition = $(item).clone();
-      definition.children("ul, ol, dl, blockquote").remove();
+      definition.find("style, script, noscript, table, audio, source, ul, ol, dl, blockquote, .mw-editsection, .reference, .citation-whole").remove();
       const value = clean(definition.text());
-      if (value && !meanings.includes(value)) meanings.push(value);
+      if (value && !value.includes(".mw-parser-output") && !meanings.includes(value)) meanings.push(value);
     });
   }
 
-  return { article, partOfSpeech, meanings };
+  return { article, partOfSpeech, meanings, examples };
 }
 
 export function parseEnglishWiktionaryHtml(word: string, html: string): ParseResult {
@@ -168,31 +246,34 @@ export function parseEnglishWiktionaryHtml(word: string, html: string): ParseRes
 
   const germanHtml = germanHeading.nextUntil(".mw-heading2").toString();
   const $ = cheerio.load(`<section id="german-entry">${germanHtml}</section>`);
-  const { article, partOfSpeech, meanings } = extractDefinitions($);
+  const { article, partOfSpeech, meanings, examples } = extractDefinitions($);
   const { etymology, morphemes } = extractModernEtymology($);
   const standaloneKind = getMorphemeKind(word);
+  const resolvedMorphemes = morphemes.length
+    ? morphemes
+    : [{
+        text: word,
+        lookup: word,
+        targetUrl: `${WIKTIONARY_ORIGIN}/wiki/${encodeURIComponent(word)}#German`,
+        kind: standaloneKind,
+        meaning: standaloneKind === "root"
+          ? "Wiktionary에 명시적인 현대 독일어 분해식이 없습니다."
+          : morphemeMeaning(standaloneKind),
+      } satisfies Morpheme];
 
   return {
     word,
     article,
     partOfSpeech,
     meanings: meanings.length ? meanings : ["영어 Wiktionary에서 정의를 자동 추출하지 못했습니다."],
+    examples: examples.length ? examples : [generatedExample(word, partOfSpeech, article)],
     etymology,
-    morphemes: morphemes.length
-      ? morphemes
-      : [{
-          text: word,
-          lookup: word,
-          targetUrl: `${WIKTIONARY_ORIGIN}/wiki/${encodeURIComponent(word)}#German`,
-          kind: standaloneKind,
-          meaning: standaloneKind === "root"
-            ? "Wiktionary에 명시적인 현대 독일어 분해식이 없습니다."
-            : morphemeMeaning(standaloneKind),
-        }],
+    morphemes: resolvedMorphemes,
     sourceUrl: `${WIKTIONARY_ORIGIN}/wiki/${encodeURIComponent(word)}#German`,
     compoundHint: morphemes.some((part) => part.kind === "compound") && article
       ? "독일어 복합명사의 관사는 보통 마지막 명사(Grundwort)의 관사를 따릅니다."
       : null,
+    articleReason: getArticleReason(word, article, resolvedMorphemes),
   };
 }
 
