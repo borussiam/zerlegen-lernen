@@ -5,6 +5,10 @@ import type { Article, FavoriteWord, GeneratedExercise, Morpheme, ParseResult } 
 
 const STORAGE_KEY = "zerlegen-lernen:favorites";
 const HISTORY_KEY = "zerlegen-lernen:results";
+const WORD_CACHE_KEY = "zerlegen-lernen:word-cache:v3";
+const WORD_CACHE_TTL_MS = 24 * 60 * 60 * 1_000;
+const WORD_CACHE_MAX_ENTRIES = 100;
+const CLIENT_REQUEST_DELAY_MS = 175;
 
 const articleStyle = {
   der: "bg-blue-100 text-blue-700 border-blue-200",
@@ -106,11 +110,86 @@ function historyUrl(results: ParseResult[]) {
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
+interface BrowserCacheEntry {
+  expiresAt: number;
+  result: ParseResult;
+}
+
+const inFlightWordRequests = new Map<string, Promise<ParseResult>>();
+
+function browserCacheKey(word: string) {
+  return word.trim().normalize("NFC");
+}
+
+function readBrowserCache() {
+  try {
+    const value = localStorage.getItem(WORD_CACHE_KEY);
+    return value ? JSON.parse(value) as Record<string, BrowserCacheEntry> : {};
+  } catch {
+    return {};
+  }
+}
+
+function getBrowserCachedWord(word: string) {
+  const cache = readBrowserCache();
+  const key = browserCacheKey(word);
+  const entry = cache[key];
+  if (!entry || entry.expiresAt <= Date.now() || !isParseResult(entry.result)) {
+    if (entry) {
+      delete cache[key];
+      try {
+        localStorage.setItem(WORD_CACHE_KEY, JSON.stringify(cache));
+      } catch {
+        // Ignore storage failures; the server cache still applies.
+      }
+    }
+    return null;
+  }
+  return entry.result;
+}
+
+function setBrowserCachedWord(word: string, result: ParseResult) {
+  try {
+    const cache = readBrowserCache();
+    const entries = Object.entries(cache)
+      .filter(([, entry]) => entry.expiresAt > Date.now() && isParseResult(entry.result))
+      .sort(([, left], [, right]) => right.expiresAt - left.expiresAt)
+      .slice(0, WORD_CACHE_MAX_ENTRIES - 2);
+    const next = Object.fromEntries(entries) as Record<string, BrowserCacheEntry>;
+    next[browserCacheKey(word)] = { expiresAt: Date.now() + WORD_CACHE_TTL_MS, result };
+    next[browserCacheKey(result.word)] = { expiresAt: Date.now() + WORD_CACHE_TTL_MS, result };
+    localStorage.setItem(WORD_CACHE_KEY, JSON.stringify(next));
+  } catch {
+    // Storage can be unavailable in private browsing; the server cache still applies.
+  }
+}
+
+function clientDelay(milliseconds = CLIENT_REQUEST_DELAY_MS) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
 async function requestWord(word: string) {
-  const response = await fetch(`/api/parse?word=${encodeURIComponent(word)}`);
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error ?? "검색에 실패했습니다.");
-  return data as ParseResult;
+  const key = browserCacheKey(word);
+  const cached = getBrowserCachedWord(key);
+  if (cached) return cached;
+
+  const existingRequest = inFlightWordRequests.get(key);
+  if (existingRequest) return existingRequest;
+
+  const request = fetch(`/api/parse?word=${encodeURIComponent(key)}`, {
+    headers: { Accept: "application/json" },
+  }).then(async (response) => {
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? "검색에 실패했습니다.");
+    const result = data as ParseResult;
+    setBrowserCachedWord(key, result);
+    return result;
+  }).finally(() => {
+    inFlightWordRequests.delete(key);
+  });
+
+  inFlightWordRequests.set(key, request);
+  return request;
 }
 
 interface ChildPreview {
@@ -130,15 +209,25 @@ function MorphemeComparisonGrid({
   useEffect(() => {
     let cancelled = false;
 
-    void Promise.all(result.morphemes.map(async (part): Promise<ChildPreview> => {
-      try {
-        return { result: await requestWord(part.lookup) };
-      } catch (caught) {
-        return { error: caught instanceof Error ? caught.message : "정보를 불러오지 못했습니다." };
+    async function loadPreviews() {
+      const next: ChildPreview[] = [];
+
+      for (const [index, part] of result.morphemes.entries()) {
+        if (index > 0) await clientDelay();
+        if (cancelled) return;
+
+        try {
+          next[index] = { result: await requestWord(part.lookup) };
+        } catch (caught) {
+          next[index] = { error: caught instanceof Error ? caught.message : "정보를 불러오지 못했습니다." };
+        }
+
+        if (cancelled) return;
+        setPreviews([...next]);
       }
-    })).then((next) => {
-      if (!cancelled) setPreviews(next);
-    });
+    }
+
+    void loadPreviews();
 
     return () => {
       cancelled = true;
@@ -263,7 +352,11 @@ export function WordWorkbench() {
 
       setLoading(true);
       try {
-        const restored = await Promise.all(words.map(requestWord));
+        const restored: ParseResult[] = [];
+        for (const [index, word] of words.entries()) {
+          if (index > 0) await clientDelay();
+          restored.push(await requestWord(word));
+        }
         applyResults(restored);
         if (replaceState && !cancelled) {
           window.history.replaceState(

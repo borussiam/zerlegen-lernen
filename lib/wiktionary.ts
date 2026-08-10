@@ -4,6 +4,11 @@ import type { Article, Morpheme, MorphemeKind, ParseResult, WordExample } from "
 
 const WIKTIONARY_ORIGIN = "https://en.wiktionary.org";
 const API_URL = `${WIKTIONARY_ORIGIN}/w/api.php`;
+const USER_AGENT = "ZerlegenLernen/1.0 (https://github.com/borussiam/zerlegen-lernen) axios/1.19.0";
+const CACHE_TTL_MS = 24 * 60 * 60 * 1_000;
+const CACHE_MAX_ENTRIES = 250;
+const REQUEST_INTERVAL_MS = 175;
+const MAX_RATE_LIMIT_RETRIES = 2;
 const SECTION_HEADING_SELECTOR = ".mw-heading2, .mw-heading3, .mw-heading4, .mw-heading5";
 const PART_OF_SPEECH = /^(?:Noun|Proper noun|Verb|Adjective|Adverb|Participle|Pronoun|Numeral|Interjection|Preposition|Conjunction|Prefix|Suffix|Affix|Infix|Interfix|Circumfix|Particle)(?: \d+)?$/i;
 
@@ -11,6 +16,118 @@ interface WiktionaryPage {
   pageid: number;
   title: string;
   missing?: boolean;
+}
+
+interface CacheEntry {
+  expiresAt: number;
+  result: ParseResult;
+}
+
+interface WiktionaryRuntimeState {
+  cache: Map<string, CacheEntry>;
+  inFlight: Map<string, Promise<ParseResult>>;
+  requestQueue: Promise<void>;
+  nextRequestAt: number;
+}
+
+const globalForWiktionary = globalThis as typeof globalThis & {
+  __zerlegenWiktionaryState?: WiktionaryRuntimeState;
+};
+
+const runtimeState = globalForWiktionary.__zerlegenWiktionaryState ??= {
+  cache: new Map(),
+  inFlight: new Map(),
+  requestQueue: Promise.resolve(),
+  nextRequestAt: 0,
+};
+
+function delay(milliseconds: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function getCachedResult(key: string) {
+  const entry = runtimeState.cache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    runtimeState.cache.delete(key);
+    return null;
+  }
+
+  runtimeState.cache.delete(key);
+  runtimeState.cache.set(key, entry);
+  return entry.result;
+}
+
+function setCachedResult(key: string, result: ParseResult) {
+  runtimeState.cache.delete(key);
+  while (runtimeState.cache.size >= CACHE_MAX_ENTRIES) {
+    const oldestKey = runtimeState.cache.keys().next().value;
+    if (typeof oldestKey !== "string") break;
+    runtimeState.cache.delete(oldestKey);
+  }
+  runtimeState.cache.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, result });
+}
+
+function enqueueWiktionaryRequest<T>(request: () => Promise<T>) {
+  const queued = runtimeState.requestQueue.then(async () => {
+    const waitTime = Math.max(0, runtimeState.nextRequestAt - Date.now());
+    if (waitTime) await delay(waitTime);
+
+    try {
+      return await request();
+    } finally {
+      runtimeState.nextRequestAt = Date.now() + REQUEST_INTERVAL_MS;
+    }
+  });
+
+  runtimeState.requestQueue = queued.then(() => undefined, () => undefined);
+  return queued;
+}
+
+function retryAfterMilliseconds(error: unknown) {
+  if (!axios.isAxiosError(error)) return 0;
+  const value = error.response?.headers?.["retry-after"];
+  if (typeof value !== "string") return 0;
+
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1_000);
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? 0 : Math.max(0, date - Date.now());
+}
+
+async function requestWiktionary(params: Record<string, string | number>) {
+  for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt += 1) {
+    try {
+      const response = await enqueueWiktionaryRequest(() => axios.get(API_URL, {
+        params,
+        timeout: 10_000,
+        headers: {
+          "User-Agent": USER_AGENT,
+          "Accept-Encoding": "gzip",
+          Accept: "application/json",
+        },
+      }));
+      const apiRateLimited = response.data?.error?.code === "ratelimited";
+      if (!apiRateLimited) return response;
+      if (attempt === MAX_RATE_LIMIT_RETRIES) {
+        throw new Error("Wiktionary 요청이 많아 잠시 제한되었습니다. 잠시 후 다시 시도해 주세요.");
+      }
+      await delay(1_000 * (2 ** attempt));
+    } catch (error) {
+      const rateLimited = axios.isAxiosError(error) && error.response?.status === 429;
+      if (!rateLimited || attempt === MAX_RATE_LIMIT_RETRIES) {
+        if (rateLimited) {
+          throw new Error("Wiktionary 요청이 많아 잠시 제한되었습니다. 잠시 후 다시 시도해 주세요.");
+        }
+        throw error;
+      }
+
+      const exponentialDelay = 1_000 * (2 ** attempt);
+      await delay(Math.max(exponentialDelay, retryAfterMilliseconds(error)));
+    }
+  }
+
+  throw new Error("Wiktionary 요청을 완료하지 못했습니다.");
 }
 
 function clean(text: string) {
@@ -277,21 +394,15 @@ export function parseEnglishWiktionaryHtml(word: string, html: string): ParseRes
   };
 }
 
-export async function parseGermanWord(input: string): Promise<ParseResult> {
-  const requestedWord = input.trim();
+async function parseGermanWordUncached(requestedWord: string): Promise<ParseResult> {
   const candidates = getCaseCandidates(requestedWord);
-  const { data: queryData } = await axios.get(API_URL, {
-    params: {
-      action: "query",
-      titles: candidates.join("|"),
-      prop: "info",
-      redirects: 1,
-      format: "json",
-      formatversion: 2,
-      origin: "*",
-    },
-    timeout: 8_000,
-    headers: { "User-Agent": "zerlegen-lernen/0.1 (educational project)" },
+  const { data: queryData } = await requestWiktionary({
+    action: "query",
+    titles: candidates.join("|"),
+    prop: "info",
+    redirects: 1,
+    format: "json",
+    formatversion: 2,
   });
 
   if (queryData.error) {
@@ -306,10 +417,11 @@ export async function parseGermanWord(input: string): Promise<ParseResult> {
 
   if (!page) throw new Error("영어 Wiktionary에서 독일어 단어를 찾을 수 없습니다.");
 
-  const { data: parseData } = await axios.get(API_URL, {
-    params: { action: "parse", pageid: page.pageid, prop: "text", format: "json", origin: "*" },
-    timeout: 8_000,
-    headers: { "User-Agent": "zerlegen-lernen/0.1 (educational project)" },
+  const { data: parseData } = await requestWiktionary({
+    action: "parse",
+    pageid: page.pageid,
+    prop: "text",
+    format: "json",
   });
 
   if (parseData.error || !parseData.parse?.text?.["*"]) {
@@ -317,4 +429,26 @@ export async function parseGermanWord(input: string): Promise<ParseResult> {
   }
 
   return parseEnglishWiktionaryHtml(page.title, parseData.parse.text["*"] as string);
+}
+
+export async function parseGermanWord(input: string): Promise<ParseResult> {
+  const requestedWord = input.trim().normalize("NFC");
+  const cached = getCachedResult(requestedWord);
+  if (cached) return cached;
+
+  const existingRequest = runtimeState.inFlight.get(requestedWord);
+  if (existingRequest) return existingRequest;
+
+  const request = parseGermanWordUncached(requestedWord)
+    .then((result) => {
+      setCachedResult(requestedWord, result);
+      if (result.word !== requestedWord) setCachedResult(result.word, result);
+      return result;
+    })
+    .finally(() => {
+      runtimeState.inFlight.delete(requestedWord);
+    });
+
+  runtimeState.inFlight.set(requestedWord, request);
+  return request;
 }
