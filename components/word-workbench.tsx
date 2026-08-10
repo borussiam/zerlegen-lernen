@@ -187,7 +187,17 @@ export function WordWorkbench() {
             )) : <p className="text-sm leading-6 text-white/50">검색 결과의 별표를 눌러 학습할 단어를 모아 보세요.</p>}
           </div>
           <div className="mt-6 flex gap-2">
-            <select value={level} onChange={(event) => setLevel(event.target.value)} className="rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-white outline-none">{["A1", "A2", "B1", "B2"].map((item) => <option className="text-ink" key={item}>{item}</option>)}</select>
+            <select
+              suppressHydrationWarning
+              id="level"
+              name="level"
+              aria-label="퀴즈 난이도"
+              value={level}
+              onChange={(event) => setLevel(event.target.value)}
+              className="rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-white outline-none"
+            >
+              {["A1", "A2", "B1", "B2"].map((item) => <option className="text-ink" key={item} value={item}>{item}</option>)}
+            </select>
             <button disabled={!favorites.length || quizLoading} onClick={() => void generateExercises()} className="flex-1 rounded-xl bg-coral px-4 py-2 text-sm font-bold hover:bg-[#c95e52] disabled:opacity-40">{quizLoading ? "문장 만드는 중…" : "AI 빈칸 퀴즈 만들기"}</button>
           </div>
         </div>
