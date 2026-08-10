@@ -1,11 +1,11 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import type { Article, FavoriteType, FavoriteWord, GeneratedExercise, Morpheme, ParseResult } from "@/lib/types";
 
 const STORAGE_KEY = "zerlegen-lernen:favorites";
 const HISTORY_KEY = "zerlegen-lernen:results";
-const WORD_CACHE_KEY = "zerlegen-lernen:word-cache:v4";
+const WORD_CACHE_KEY = "zerlegen-lernen:word-cache:v5";
 const WORD_CACHE_TTL_MS = 24 * 60 * 60 * 1_000;
 const WORD_CACHE_MAX_ENTRIES = 100;
 const CLIENT_REQUEST_DELAY_MS = 175;
@@ -147,13 +147,27 @@ function favoriteTypes(item: FavoriteWord): FavoriteType[] {
   return item.favoriteTypes?.length ? item.favoriteTypes : ["meaning"];
 }
 
+function favoriteFromResult(result: ParseResult, types: FavoriteType[]): FavoriteWord {
+  return {
+    word: result.word,
+    article: result.article,
+    meaning: result.meanings[0],
+    decomposition: result.morphemes.map((part) => part.text).join(" + "),
+    partOfSpeech: result.partOfSpeech,
+    morphemes: result.morphemes,
+    articleReason: result.articleReason,
+    favoriteTypes: types,
+  };
+}
+
 function articleReasonText(reason: string | null | undefined, article: Article) {
   const cleaned = reason
     ?.replace(/\s*영어 Wiktionary의 이 항목(?:도|은) [^.]+표기합니다\./g, "")
     .replace(/영어 Wiktionary의 독일어 명사 성 표기에 따라 [^.]+사용합니다\.\s*/g, "")
     .replace(/Wiktionary의 성 표기에 따라 [^.]+사용합니다\.\s*/g, "")
     .trim();
-  return cleaned || (article ? `뚜렷한 규칙이 없으면 ${article}와 단어를 함께 익히는 것이 좋습니다.` : null);
+  if (!cleaned || !article || /뚜렷한|확실한 .*규칙이 없|관사 (?:der|die|das)와 단어를 함께/.test(cleaned)) return null;
+  return cleaned;
 }
 
 function shuffled<T>(items: T[]) {
@@ -244,7 +258,7 @@ async function requestWord(word: string) {
   const existingRequest = inFlightWordRequests.get(key);
   if (existingRequest) return existingRequest;
 
-  const request = fetch(`/api/parse?word=${encodeURIComponent(key)}&v=4`, {
+  const request = fetch(`/api/parse?word=${encodeURIComponent(key)}&v=5`, {
     headers: { Accept: "application/json" },
   }).then(async (response) => {
     const data = await response.json();
@@ -375,6 +389,7 @@ export function WordWorkbench() {
   const [showAnswers, setShowAnswers] = useState(false);
   const [activeTab, setActiveTab] = useState<"explore" | "favorites">("explore");
   const [favoritePopover, setFavoritePopover] = useState<FavoritePartPopover | null>(null);
+  const favoritePopoverRef = useRef<HTMLElement>(null);
   const [articleQuestions, setArticleQuestions] = useState<ArticleQuizQuestion[]>([]);
   const [articleQuestionIndex, setArticleQuestionIndex] = useState(0);
   const [articleAnswer, setArticleAnswer] = useState<DefiniteArticle | null>(null);
@@ -385,6 +400,7 @@ export function WordWorkbench() {
   const [wrongArticleQuestions, setWrongArticleQuestions] = useState<ArticleQuizQuestion[]>([]);
   const [articleQuizRound, setArticleQuizRound] = useState<"main" | "retry">("main");
   const [expandedMorphemes, setExpandedMorphemes] = useState<Record<string, string[]>>({});
+  const [favoriteRequestKey, setFavoriteRequestKey] = useState<string | null>(null);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -397,6 +413,20 @@ export function WordWorkbench() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
+
+  useEffect(() => {
+    if (!favoritePopover) return;
+
+    function dismissPopover(event: PointerEvent) {
+      if (event.target instanceof Element && event.target.closest("[data-favorite-popover-trigger]")) return;
+      if (!favoritePopoverRef.current?.contains(event.target as Node)) {
+        setFavoritePopover(null);
+      }
+    }
+
+    document.addEventListener("pointerdown", dismissPopover);
+    return () => document.removeEventListener("pointerdown", dismissPopover);
+  }, [favoritePopover]);
 
   useEffect(() => {
     let cancelled = false;
@@ -457,9 +487,65 @@ export function WordWorkbench() {
     };
   }, []);
 
-  function saveFavorites(next: FavoriteWord[]) {
-    setFavorites(next);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  function updateFavorites(updater: (current: FavoriteWord[]) => FavoriteWord[]) {
+    setFavorites((current) => {
+      const next = updater(current);
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // Keep the in-memory wordbook usable when browser storage is unavailable.
+      }
+      return next;
+    });
+  }
+
+  function addFavoriteTypeFromResult(result: ParseResult, type: FavoriteType) {
+    const key = normalizedWord(result.word);
+    updateFavorites((current) => {
+      const existing = current.find((item) => normalizedWord(item.word) === key);
+      const types = existing ? favoriteTypes(existing) : [];
+      const nextTypes = types.includes(type) ? types : [...types, type];
+      const nextFavorite = favoriteFromResult(result, nextTypes);
+      return existing
+        ? current.map((item) => normalizedWord(item.word) === key ? nextFavorite : item)
+        : [...current, nextFavorite];
+    });
+  }
+
+  function removeFavoriteType(word: string, type: FavoriteType) {
+    const key = normalizedWord(word);
+    updateFavorites((current) => current.flatMap((item): FavoriteWord[] => {
+      if (normalizedWord(item.word) !== key) return [item];
+      const nextTypes = favoriteTypes(item).filter((favoriteType) => favoriteType !== type);
+      return nextTypes.length ? [{ ...item, favoriteTypes: nextTypes }] : [];
+    }));
+    setFavoritePopover((current) => current?.owner === word ? null : current);
+  }
+
+  async function toggleFavoriteByWord(word: string, type: FavoriteType) {
+    if (hasFavoriteType(word, type)) {
+      removeFavoriteType(word, type);
+      return;
+    }
+
+    const requestKey = `${normalizedWord(word)}:${type}`;
+    setFavoriteRequestKey(requestKey);
+    try {
+      addFavoriteTypeFromResult(await requestWord(word), type);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "단어장 저장에 실패했습니다.");
+    } finally {
+      setFavoriteRequestKey((current) => current === requestKey ? null : current);
+    }
+  }
+
+  function syncFavoriteData(result: ParseResult) {
+    const key = normalizedWord(result.word);
+    updateFavorites((current) => current.some((item) => normalizedWord(item.word) === key)
+      ? current.map((item) => normalizedWord(item.word) === key
+          ? favoriteFromResult(result, favoriteTypes(item))
+          : item)
+      : current);
   }
 
   function pushResults(next: ParseResult[]) {
@@ -480,6 +566,7 @@ export function WordWorkbench() {
     setError("");
     try {
       const data = await requestWord(cleanWord);
+      syncFavoriteData(data);
       pushResults([...parents, data]);
       setActiveTab("explore");
     } catch (caught) {
@@ -495,41 +582,8 @@ export function WordWorkbench() {
   }
 
   function toggleFavoriteType(result: ParseResult, type: FavoriteType) {
-    const key = normalizedWord(result.word);
-    const existing = favorites.find((item) => normalizedWord(item.word) === key);
-    if (!existing) {
-      saveFavorites([...favorites, {
-        word: result.word,
-        article: result.article,
-        meaning: result.meanings[0],
-        decomposition: result.morphemes.map((part) => part.text).join(" + "),
-        partOfSpeech: result.partOfSpeech,
-        morphemes: result.morphemes,
-        articleReason: result.articleReason,
-        favoriteTypes: [type],
-      }]);
-      return;
-    }
-
-    const types = favoriteTypes(existing);
-    const nextTypes = types.includes(type) ? types.filter((item) => item !== type) : [...types, type];
-    saveFavorites(nextTypes.length
-      ? favorites.map((item) => normalizedWord(item.word) === key ? {
-          ...item,
-          article: result.article,
-          meaning: result.meanings[0],
-          decomposition: result.morphemes.map((part) => part.text).join(" + "),
-          partOfSpeech: result.partOfSpeech,
-          morphemes: result.morphemes,
-          articleReason: result.articleReason,
-          favoriteTypes: nextTypes,
-        } : item)
-      : favorites.filter((item) => normalizedWord(item.word) !== key));
-  }
-
-  function removeFavorite(word: string) {
-    saveFavorites(favorites.filter((item) => normalizedWord(item.word) !== normalizedWord(word)));
-    setFavoritePopover((current) => current?.owner === word ? null : current);
+    if (hasFavoriteType(result.word, type)) removeFavoriteType(result.word, type);
+    else addFavoriteTypeFromResult(result, type);
   }
 
   function selectHistoryStep(index: number) {
@@ -544,6 +598,11 @@ export function WordWorkbench() {
   }
 
   async function openFavoritePart(owner: string, part: Morpheme, anchor: HTMLButtonElement) {
+    if (favoritePopover?.owner === owner && favoritePopover.part.lookup === part.lookup) {
+      setFavoritePopover(null);
+      return;
+    }
+
     const bounds = anchor.getBoundingClientRect();
     const left = Math.max(12, Math.min(bounds.left, window.innerWidth - 348));
     const top = bounds.bottom + 10 > window.innerHeight - 260
@@ -573,14 +632,17 @@ export function WordWorkbench() {
             word: item.word,
             article: item.article,
             meaning: item.meaning,
-            reason: articleReasonText(item.articleReason, item.article) ?? `관사 ${item.article}와 단어를 함께 익혀 보세요.`,
+            reason: articleReasonText(item.articleReason, item.article) ?? "-",
           }]
         : []
     ));
     const unique = new Map<string, ArticleQuizQuestion>();
     [...savedQuestions, ...(ARTICLE_QUIZ_POOL[level] ?? ARTICLE_QUIZ_POOL.A2)].forEach((question) => {
       const key = normalizedWord(question.word);
-      if (!unique.has(key)) unique.set(key, question);
+      if (!unique.has(key)) unique.set(key, {
+        ...question,
+        reason: articleReasonText(question.reason, question.article) ?? "-",
+      });
     });
     const next = shuffled(Array.from(unique.values())).slice(0, 8);
 
@@ -625,28 +687,6 @@ export function WordWorkbench() {
     setArticleHintVisible(false);
     setWrongArticleQuestions([]);
     setArticleQuizRound("retry");
-  }
-
-  function addQuizWordToFavorites(question: ArticleQuizQuestion) {
-    const key = normalizedWord(question.word);
-    const existing = favorites.find((item) => normalizedWord(item.word) === key);
-    if (existing) {
-      const types = favoriteTypes(existing);
-      if (types.includes("article")) return;
-      saveFavorites(favorites.map((item) => normalizedWord(item.word) === key
-        ? { ...item, article: question.article, articleReason: question.reason, favoriteTypes: [...types, "article"] }
-        : item));
-      return;
-    }
-
-    saveFavorites([...favorites, {
-      word: question.word,
-      article: question.article,
-      meaning: question.meaning,
-      partOfSpeech: "Noun",
-      articleReason: question.reason,
-      favoriteTypes: ["article"],
-    }]);
   }
 
   function toggleMorpheme(resultIndex: number, word: string, lookup: string) {
@@ -791,7 +831,7 @@ export function WordWorkbench() {
                         <a href={result.sourceUrl} target="_blank" rel="noreferrer" className="font-bold underline decoration-moss/30 underline-offset-4">Wiktionary 원문 ↗</a>
                       </div>
 
-                      {articleReasonText(result.articleReason, result.article) && <p className="mt-6 rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm leading-6 text-blue-950"><strong>왜 {result.article}일까요?</strong> {articleReasonText(result.articleReason, result.article)}</p>}
+                      {result.article && <p className="mt-6 rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm leading-6 text-blue-950"><strong>왜 {result.article}일까요?</strong> {articleReasonText(result.articleReason, result.article) ?? "-"}</p>}
 
                       <div className="mt-7 border-t border-ink/10 pt-7">
                         <h3 className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-coral">Bedeutung · 뜻</h3>
@@ -838,9 +878,9 @@ export function WordWorkbench() {
             {favorites.length ? (
               <div className="p-3 sm:p-5">
                 <div className="overflow-x-auto rounded-2xl border border-ink/10">
-                <table className="w-full min-w-[1040px] border-collapse text-left text-sm">
+                <table className="w-full min-w-[960px] border-collapse text-left text-sm">
                   <thead className="bg-paper text-[10px] uppercase tracking-[0.18em] text-ink/45">
-                    <tr><th className="px-5 py-3">관사</th><th className="px-4 py-3">단어</th><th className="px-4 py-3">학습 표시</th><th className="px-4 py-3">뜻</th><th className="px-4 py-3">분해 요소</th><th className="px-5 py-3">관사 이유</th><th className="px-5 py-3 text-right">해제</th></tr>
+                    <tr><th className="px-5 py-3">관사</th><th className="px-4 py-3">단어</th><th className="px-4 py-3">별표 유형</th><th className="px-4 py-3">뜻</th><th className="px-4 py-3">분해 요소</th><th className="px-5 py-3">관사 이유</th></tr>
                   </thead>
                   <tbody>
                     {favorites.map((item) => {
@@ -856,8 +896,8 @@ export function WordWorkbench() {
                           </td>
                           <td className="px-4 py-5">
                             <div className="flex flex-wrap gap-1.5">
-                              {types.includes("meaning") && <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-bold text-amber-800">★ 뜻</span>}
-                              {types.includes("article") && <span className="rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-bold text-blue-800">★ 관사</span>}
+                              <button type="button" disabled={favoriteRequestKey === `${normalizedWord(item.word)}:meaning`} onClick={() => void toggleFavoriteByWord(item.word, "meaning")} aria-pressed={types.includes("meaning")} className={`rounded-full border px-2.5 py-1 text-[11px] font-bold transition disabled:opacity-50 ${types.includes("meaning") ? "border-amber-300 bg-amber-100 text-amber-800" : "border-ink/15 bg-white text-ink/45 hover:bg-amber-50"}`}>{types.includes("meaning") ? "★ 뜻" : "☆ 뜻"}</button>
+                              <button type="button" disabled={!item.article || favoriteRequestKey === `${normalizedWord(item.word)}:article`} onClick={() => void toggleFavoriteByWord(item.word, "article")} aria-pressed={types.includes("article")} className={`rounded-full border px-2.5 py-1 text-[11px] font-bold transition disabled:opacity-35 ${types.includes("article") ? "border-blue-300 bg-blue-100 text-blue-800" : "border-ink/15 bg-white text-ink/45 hover:bg-blue-50"}`}>{types.includes("article") ? "★ 관사" : "☆ 관사"}</button>
                             </div>
                           </td>
                           <td className="max-w-sm px-4 py-5 leading-6 text-ink/65">{item.meaning}</td>
@@ -867,14 +907,13 @@ export function WordWorkbench() {
                                 {parts.map((part, index) => (
                                   <span key={`${part.lookup}-${index}`} className="flex items-center gap-1.5">
                                     {index > 0 && <span className="text-ink/25">+</span>}
-                                    <button type="button" onClick={(event) => void openFavoritePart(item.word, part, event.currentTarget)} className="rounded-lg border border-moss/20 bg-moss/5 px-2.5 py-1.5 font-bold text-moss transition hover:bg-moss hover:text-white">{part.text}</button>
+                                    <button type="button" data-favorite-popover-trigger onClick={(event) => void openFavoritePart(item.word, part, event.currentTarget)} className="rounded-lg border border-moss/20 bg-moss/5 px-2.5 py-1.5 font-bold text-moss transition hover:bg-moss hover:text-white">{part.text}</button>
                                   </span>
                                 ))}
                               </div>
                             ) : <span className="text-ink/35">{item.morphemes?.length || item.decomposition ? "분해 완료" : "상세 검색에서 확인"}</span>}
                           </td>
-                          <td className="max-w-xs px-5 py-5 text-xs leading-5 text-ink/55">{articleReasonText(item.articleReason, item.article) ?? "—"}</td>
-                          <td className="px-5 py-5 text-right"><button type="button" onClick={() => removeFavorite(item.word)} aria-label={`${item.word} 단어장 해제`} className="whitespace-nowrap rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-800 transition hover:bg-amber-100">★ 해제</button></td>
+                          <td className="max-w-xs px-5 py-5 text-xs leading-5 text-ink/55">{articleReasonText(item.articleReason, item.article) ?? "-"}</td>
                         </tr>
                       );
                     })}
@@ -961,7 +1000,10 @@ export function WordWorkbench() {
                       <p className="text-xs font-bold uppercase tracking-[0.2em] text-ink/35">Welcher Artikel?</p>
                       <h2 className="mt-3 font-serif text-5xl font-bold sm:text-7xl">{articleQuestion.word}</h2>
                     </div>
-                    <button type="button" disabled={hasFavoriteType(articleQuestion.word, "article")} onClick={() => addQuizWordToFavorites(articleQuestion)} aria-label={`${articleQuestion.word} 관사 단어장에 추가`} className={`rounded-full border px-4 py-2 text-sm font-bold transition ${hasFavoriteType(articleQuestion.word, "article") ? "border-blue-200 bg-blue-50 text-blue-800" : "border-ink/15 hover:bg-amber-50 hover:text-amber-800"}`}>{hasFavoriteType(articleQuestion.word, "article") ? "★ 관사 단어장" : "☆ 관사 단어장에 추가"}</button>
+                    <div className="flex flex-col items-end gap-2 sm:flex-row">
+                      <button type="button" disabled={favoriteRequestKey === `${normalizedWord(articleQuestion.word)}:meaning`} onClick={() => void toggleFavoriteByWord(articleQuestion.word, "meaning")} aria-pressed={hasFavoriteType(articleQuestion.word, "meaning")} className={`rounded-full border px-3 py-2 text-xs font-bold transition disabled:opacity-50 ${hasFavoriteType(articleQuestion.word, "meaning") ? "border-amber-300 bg-amber-100 text-amber-800" : "border-ink/15 bg-white hover:bg-amber-50"}`}>{hasFavoriteType(articleQuestion.word, "meaning") ? "★ 뜻 단어" : "☆ 뜻을 모름"}</button>
+                      <button type="button" disabled={favoriteRequestKey === `${normalizedWord(articleQuestion.word)}:article`} onClick={() => void toggleFavoriteByWord(articleQuestion.word, "article")} aria-pressed={hasFavoriteType(articleQuestion.word, "article")} className={`rounded-full border px-3 py-2 text-xs font-bold transition disabled:opacity-50 ${hasFavoriteType(articleQuestion.word, "article") ? "border-blue-300 bg-blue-100 text-blue-800" : "border-ink/15 bg-white hover:bg-blue-50"}`}>{hasFavoriteType(articleQuestion.word, "article") ? "★ 관사 단어" : "☆ 관사를 모름"}</button>
+                    </div>
                   </div>
 
                   <div className="mt-7 min-h-14">
@@ -991,7 +1033,7 @@ export function WordWorkbench() {
       )}
 
       {favoritePopover && (
-        <aside role="dialog" aria-label={`${favoritePopover.part.text} 빠른 설명`} style={{ top: favoritePopover.top, left: favoritePopover.left }} className="fixed z-50 w-[min(21rem,calc(100vw-1.5rem))] rounded-2xl border border-ink/15 bg-white p-4 shadow-2xl">
+        <aside ref={favoritePopoverRef} role="dialog" aria-label={`${favoritePopover.part.text} 빠른 설명`} style={{ top: favoritePopover.top, left: favoritePopover.left }} className="fixed z-50 w-[min(21rem,calc(100vw-1.5rem))] rounded-2xl border border-ink/15 bg-white p-4 shadow-2xl">
             <span aria-hidden className="absolute -top-2 left-8 h-4 w-4 rotate-45 border-l border-t border-ink/15 bg-white" />
             <button type="button" onClick={() => setFavoritePopover(null)} aria-label="닫기" className="absolute right-3 top-3 grid h-7 w-7 place-items-center rounded-full bg-paper text-ink/55 hover:text-ink">×</button>
             <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-ink/40">{favoritePopover.owner}의 구성 요소</p>

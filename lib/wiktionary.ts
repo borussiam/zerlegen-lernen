@@ -31,10 +31,10 @@ interface WiktionaryRuntimeState {
 }
 
 const globalForWiktionary = globalThis as typeof globalThis & {
-  __zerlegenWiktionaryStateV2?: WiktionaryRuntimeState;
+  __zerlegenWiktionaryStateV3?: WiktionaryRuntimeState;
 };
 
-const runtimeState = globalForWiktionary.__zerlegenWiktionaryStateV2 ??= {
+const runtimeState = globalForWiktionary.__zerlegenWiktionaryStateV3 ??= {
   cache: new Map(),
   inFlight: new Map(),
   requestQueue: Promise.resolve(),
@@ -240,7 +240,7 @@ function getArticleReason(word: string, article: Article, morphemes: Morpheme[])
     return "복합명사는 보통 마지막 기본어(Grundwort)의 성을 따릅니다.";
   }
 
-  return `뚜렷한 생산적 접미사 규칙이 없으므로 ${article}와 단어를 함께 익히는 편이 안전합니다.`;
+  return null;
 }
 
 function extractModernEtymology($: cheerio.CheerioAPI) {
