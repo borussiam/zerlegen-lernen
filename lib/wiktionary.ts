@@ -1,6 +1,8 @@
 import axios from "axios";
+import type { AxiosResponse } from "axios";
 import * as cheerio from "cheerio";
-import type { Article, Morpheme, MorphemeKind, ParseResult, WordExample } from "@/lib/types";
+import { getGermanCaseCandidates } from "./german-word";
+import type { Article, Morpheme, MorphemeKind, ParseResult, WordExample } from "./types";
 
 const WIKTIONARY_ORIGIN = "https://en.wiktionary.org";
 const API_URL = `${WIKTIONARY_ORIGIN}/w/api.php`;
@@ -12,10 +14,19 @@ const MAX_RATE_LIMIT_RETRIES = 2;
 const SECTION_HEADING_SELECTOR = ".mw-heading2, .mw-heading3, .mw-heading4, .mw-heading5";
 const PART_OF_SPEECH = /^(?:Noun|Proper noun|Verb|Adjective|Adverb|Participle|Pronoun|Numeral|Interjection|Preposition|Conjunction|Prefix|Suffix|Affix|Infix|Interfix|Circumfix|Particle)(?: \d+)?$/i;
 
-interface WiktionaryPage {
-  pageid: number;
-  title: string;
-  missing?: boolean;
+interface WiktionaryApiError {
+  code?: string;
+  info?: string;
+}
+
+interface WiktionaryApiResponse {
+  error?: WiktionaryApiError;
+  parse?: {
+    title?: string;
+    text?: {
+      "*"?: string;
+    };
+  };
 }
 
 interface CacheEntry {
@@ -95,10 +106,12 @@ function retryAfterMilliseconds(error: unknown) {
   return Number.isNaN(date) ? 0 : Math.max(0, date - Date.now());
 }
 
-async function requestWiktionary(params: Record<string, string | number>) {
+async function requestWiktionary(
+  params: Record<string, string | number>,
+): Promise<AxiosResponse<WiktionaryApiResponse>> {
   for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt += 1) {
     try {
-      const response = await enqueueWiktionaryRequest(() => axios.get(API_URL, {
+      const response = await enqueueWiktionaryRequest(() => axios.get<WiktionaryApiResponse>(API_URL, {
         params,
         timeout: 10_000,
         headers: {
@@ -182,20 +195,6 @@ function getLinkedPage(href: string) {
   }
 
   return lookup ? { lookup, targetUrl: url.href } : null;
-}
-
-function getCaseCandidates(word: string) {
-  const firstLetterIndex = word.search(/\p{L}/u);
-  if (firstLetterIndex < 0) return [word];
-
-  const firstLetter = word[firstLetterIndex];
-  const prefix = word.slice(0, firstLetterIndex);
-  const rest = word.slice(firstLetterIndex + firstLetter.length);
-  return Array.from(new Set([
-    word,
-    `${prefix}${firstLetter.toLocaleLowerCase("de-DE")}${rest}`,
-    `${prefix}${firstLetter.toLocaleUpperCase("de-DE")}${rest}`,
-  ]));
 }
 
 function getMorphemeKind(term: string): MorphemeKind {
@@ -395,40 +394,39 @@ export function parseEnglishWiktionaryHtml(word: string, html: string): ParseRes
 }
 
 async function parseGermanWordUncached(requestedWord: string): Promise<ParseResult> {
-  const candidates = getCaseCandidates(requestedWord);
-  const { data: queryData } = await requestWiktionary({
-    action: "query",
-    titles: candidates.join("|"),
-    prop: "info",
-    redirects: 1,
-    format: "json",
-    formatversion: 2,
-  });
+  const candidates = getGermanCaseCandidates(requestedWord);
+  for (const candidate of candidates) {
+    const { data: parseData } = await requestWiktionary({
+      action: "parse",
+      page: candidate,
+      redirects: 1,
+      prop: "text",
+      format: "json",
+    });
+    const html = parseData.parse?.text?.["*"];
 
-  if (queryData.error) {
-    throw new Error(queryData.error.info ?? "독일어 사전에서 단어를 찾을 수 없습니다.");
+    if (parseData.error || !html) continue;
+
+    try {
+      return parseEnglishWiktionaryHtml(parseData.parse?.title ?? candidate, html);
+    } catch (error) {
+      const missingGermanEntry = error instanceof Error
+        && error.message === "독일어 사전 항목을 찾을 수 없습니다.";
+      if (!missingGermanEntry) throw error;
+    }
   }
 
-  const pages = (queryData.query?.pages ?? []) as WiktionaryPage[];
-  const page = candidates
-    .map((candidate) => pages.find((item) => !item.missing && item.title === candidate))
-    .find((item): item is WiktionaryPage => Boolean(item))
-    ?? pages.find((item) => !item.missing && item.pageid > 0);
+  throw new Error("독일어 사전 항목을 찾을 수 없습니다.");
+}
 
-  if (!page) throw new Error("독일어 사전에서 단어를 찾을 수 없습니다.");
-
-  const { data: parseData } = await requestWiktionary({
-    action: "parse",
-    pageid: page.pageid,
-    prop: "text",
-    format: "json",
-  });
-
-  if (parseData.error || !parseData.parse?.text?.["*"]) {
-    throw new Error(parseData.error?.info ?? "독일어 사전에서 단어를 불러오지 못했습니다.");
+export function resetWiktionaryRuntimeForTests() {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("Wiktionary 런타임 초기화는 테스트 환경에서만 사용할 수 있습니다.");
   }
-
-  return parseEnglishWiktionaryHtml(page.title, parseData.parse.text["*"] as string);
+  runtimeState.cache.clear();
+  runtimeState.inFlight.clear();
+  runtimeState.requestQueue = Promise.resolve();
+  runtimeState.nextRequestAt = 0;
 }
 
 export async function parseGermanWord(input: string): Promise<ParseResult> {

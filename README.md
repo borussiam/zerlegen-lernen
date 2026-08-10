@@ -5,6 +5,7 @@
 ## 현재 구현된 기반 기능
 
 - 영어 Wiktionary MediaWiki API + Cheerio 기반 독일어 뜻·어원·관사 추출
+- A1–B2 필수 어휘 2,500개 사전 파싱 캐시와 서버 메모리 인덱스
 - Etymology의 `Equivalent to … + …` 또는 링크 기반 `… + …` 표기를 따르는 형태소 분해
 - 대소문자 후보를 canonical page ID로 해석하는 명사·동사·형용사·접사 통합 조회
 - URL/브라우저 히스토리와 동기화되는 단계형 재귀 탐색 흐름
@@ -16,7 +17,7 @@
 
 ## 기술 스택
 
-- Next.js App Router, React, TypeScript
+- Next.js App Router, React, TypeScript, Vitest
 - Tailwind CSS
 - Axios, Cheerio
 - OpenAI 호환 Chat Completions API (`gpt-4o-mini` 기본값)
@@ -47,9 +48,11 @@ npm run dev
 
 ```bash
 npm run dev        # 개발 서버
+npm test           # Wiktionary 파서 단위 테스트
 npm run typecheck  # TypeScript 검사
 npm run lint       # ESLint 검사
 npm run build      # 프로덕션 빌드
+npm run data:build # 1.5초 간격으로 2,500개 캐시 재구축/이어받기
 npm start          # 빌드 결과 실행
 ```
 
@@ -65,8 +68,14 @@ app/
 components/
   word-workbench.tsx       # 검색, 결과, 즐겨찾기, 퀴즈 UI
 lib/
+  german-word.ts           # 독일어 표제어 대소문자 후보
+  preparsed-words.ts       # 사전 파싱 데이터 서버 인덱스
   types.ts                 # 공유 타입
   wiktionary.ts            # MediaWiki 응답 파서
+scripts/
+  build-preparsed-words.ts # 재시작 가능한 2,500개 데이터 빌더
+public/data/
+  pre-parsed-words.json    # 빌드된 A1–B2 사전 캐시
 ```
 
 ## API 예시

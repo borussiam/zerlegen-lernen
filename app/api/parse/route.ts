@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getPreParsedWord } from "@/lib/preparsed-words";
 import { parseGermanWord } from "@/lib/wiktionary";
 
 export const runtime = "nodejs";
@@ -11,9 +12,11 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    return NextResponse.json(await parseGermanWord(word), {
+    const preParsed = await getPreParsedWord(word);
+    return NextResponse.json(preParsed ?? await parseGermanWord(word), {
       headers: {
         "Cache-Control": "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800",
+        "X-Zerlegen-Cache": preParsed ? "pre-parsed" : "wiktionary",
       },
     });
   } catch (error) {

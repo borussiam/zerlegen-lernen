@@ -7,7 +7,9 @@
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "data:build": "tsx scripts/build-preparsed-words.ts"
   },
   "dependencies": {
     "axios": "^1.7.9",
@@ -25,6 +27,8 @@
     "eslint-config-next": "^16.3.0",
     "postcss": "^8.5.1",
     "tailwindcss": "^3.4.17",
-    "typescript": "^5.7.3"
+    "tsx": "^4.23.12",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.10"
   }
 }
