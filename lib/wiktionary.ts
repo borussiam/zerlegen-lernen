@@ -5,7 +5,13 @@ import type { Article, Morpheme, MorphemeKind, ParseResult } from "@/lib/types";
 const WIKTIONARY_ORIGIN = "https://en.wiktionary.org";
 const API_URL = `${WIKTIONARY_ORIGIN}/w/api.php`;
 const SECTION_HEADING_SELECTOR = ".mw-heading2, .mw-heading3, .mw-heading4, .mw-heading5";
-const PART_OF_SPEECH = /^(?:Noun|Proper noun|Verb|Adjective|Adverb|Participle|Pronoun|Numeral|Interjection|Preposition|Conjunction)(?: \d+)?$/i;
+const PART_OF_SPEECH = /^(?:Noun|Proper noun|Verb|Adjective|Adverb|Participle|Pronoun|Numeral|Interjection|Preposition|Conjunction|Prefix|Suffix|Affix|Infix|Interfix|Circumfix|Particle)(?: \d+)?$/i;
+
+interface WiktionaryPage {
+  pageid: number;
+  title: string;
+  missing?: boolean;
+}
 
 function clean(text: string) {
   return text
@@ -26,6 +32,20 @@ function getLinkedPage(href: string) {
   }
 
   return lookup ? { lookup, targetUrl: url.href } : null;
+}
+
+function getCaseCandidates(word: string) {
+  const firstLetterIndex = word.search(/\p{L}/u);
+  if (firstLetterIndex < 0) return [word];
+
+  const firstLetter = word[firstLetterIndex];
+  const prefix = word.slice(0, firstLetterIndex);
+  const rest = word.slice(firstLetterIndex + firstLetter.length);
+  return Array.from(new Set([
+    word,
+    `${prefix}${firstLetter.toLocaleLowerCase("de-DE")}${rest}`,
+    `${prefix}${firstLetter.toLocaleUpperCase("de-DE")}${rest}`,
+  ]));
 }
 
 function getMorphemeKind(term: string): MorphemeKind {
@@ -51,10 +71,11 @@ function extractModernEtymology($: cheerio.CheerioAPI) {
     for (const paragraph of paragraphs.toArray()) {
       const html = $(paragraph).html() ?? "";
       const marker = /\bequivalent to\b/i.exec(html);
-      if (!marker || marker.index === undefined) continue;
+      const paragraphText = clean($(paragraph).text());
+      if ((!marker || marker.index === undefined) && !paragraphText.includes("+")) continue;
 
-      const fragment = cheerio.load(`<p>${html.slice(marker.index)}</p>`);
-      const etymology = clean(fragment("p").text());
+      const fragmentHtml = marker?.index === undefined ? html : html.slice(marker.index);
+      const fragment = cheerio.load(`<p>${fragmentHtml}</p>`);
       const linkedParts: Array<Morpheme & { targetUrl: string }> = [];
       const seen = new Set<string>();
 
@@ -65,7 +86,7 @@ function extractModernEtymology($: cheerio.CheerioAPI) {
 
         const language = link.closest("[lang]").attr("lang");
         const linkedPage = getLinkedPage(href);
-        if (!linkedPage || (language && language !== "de")) return;
+        if (!linkedPage || (language !== "de" && !linkedPage.targetUrl.endsWith("#German"))) return;
         if (!linkedPage.targetUrl.startsWith(`${WIKTIONARY_ORIGIN}/`)) return;
 
         const text = clean(link.text()) || linkedPage.lookup;
@@ -91,7 +112,11 @@ function extractModernEtymology($: cheerio.CheerioAPI) {
             part.meaning = morphemeMeaning("compound");
           });
         }
-        return { etymology, morphemes: linkedParts };
+        const decomposition = linkedParts.map((part) => part.text).join(" + ");
+        return {
+          etymology: marker ? `equivalent to ${decomposition}` : decomposition,
+          morphemes: linkedParts,
+        };
       }
     }
   }
@@ -111,7 +136,7 @@ function extractDefinitions($: cheerio.CheerioAPI) {
     const contents = $(heading).closest(".mw-heading").nextUntil(SECTION_HEADING_SELECTOR);
     partOfSpeech ??= headingText.replace(/ \d+$/, "");
 
-    if (!article) {
+    if (!article && /^(?:Noun|Proper noun)(?: \d+)?$/i.test(headingText)) {
       const gender = clean(contents.find(".headword-line .gender abbr").first().text()).toLowerCase();
       if (gender.startsWith("m")) article = "der";
       else if (gender.startsWith("f")) article = "die";
@@ -145,6 +170,7 @@ export function parseEnglishWiktionaryHtml(word: string, html: string): ParseRes
   const $ = cheerio.load(`<section id="german-entry">${germanHtml}</section>`);
   const { article, partOfSpeech, meanings } = extractDefinitions($);
   const { etymology, morphemes } = extractModernEtymology($);
+  const standaloneKind = getMorphemeKind(word);
 
   return {
     word,
@@ -158,8 +184,10 @@ export function parseEnglishWiktionaryHtml(word: string, html: string): ParseRes
           text: word,
           lookup: word,
           targetUrl: `${WIKTIONARY_ORIGIN}/wiki/${encodeURIComponent(word)}#German`,
-          kind: "root",
-          meaning: "Wiktionary에 명시적인 현대 독일어 분해식이 없습니다.",
+          kind: standaloneKind,
+          meaning: standaloneKind === "root"
+            ? "Wiktionary에 명시적인 현대 독일어 분해식이 없습니다."
+            : morphemeMeaning(standaloneKind),
         }],
     sourceUrl: `${WIKTIONARY_ORIGIN}/wiki/${encodeURIComponent(word)}#German`,
     compoundHint: morphemes.some((part) => part.kind === "compound") && article
@@ -169,16 +197,43 @@ export function parseEnglishWiktionaryHtml(word: string, html: string): ParseRes
 }
 
 export async function parseGermanWord(input: string): Promise<ParseResult> {
-  const word = input.trim();
-  const { data } = await axios.get(API_URL, {
-    params: { action: "parse", page: word, prop: "text", format: "json", origin: "*" },
+  const requestedWord = input.trim();
+  const candidates = getCaseCandidates(requestedWord);
+  const { data: queryData } = await axios.get(API_URL, {
+    params: {
+      action: "query",
+      titles: candidates.join("|"),
+      prop: "info",
+      redirects: 1,
+      format: "json",
+      formatversion: 2,
+      origin: "*",
+    },
     timeout: 8_000,
     headers: { "User-Agent": "zerlegen-lernen/0.1 (educational project)" },
   });
 
-  if (data.error || !data.parse?.text?.["*"]) {
-    throw new Error(data.error?.info ?? "영어 Wiktionary에서 단어를 찾을 수 없습니다.");
+  if (queryData.error) {
+    throw new Error(queryData.error.info ?? "영어 Wiktionary에서 단어를 찾을 수 없습니다.");
   }
 
-  return parseEnglishWiktionaryHtml(word, data.parse.text["*"] as string);
+  const pages = (queryData.query?.pages ?? []) as WiktionaryPage[];
+  const page = candidates
+    .map((candidate) => pages.find((item) => !item.missing && item.title === candidate))
+    .find((item): item is WiktionaryPage => Boolean(item))
+    ?? pages.find((item) => !item.missing && item.pageid > 0);
+
+  if (!page) throw new Error("영어 Wiktionary에서 독일어 단어를 찾을 수 없습니다.");
+
+  const { data: parseData } = await axios.get(API_URL, {
+    params: { action: "parse", pageid: page.pageid, prop: "text", format: "json", origin: "*" },
+    timeout: 8_000,
+    headers: { "User-Agent": "zerlegen-lernen/0.1 (educational project)" },
+  });
+
+  if (parseData.error || !parseData.parse?.text?.["*"]) {
+    throw new Error(parseData.error?.info ?? "영어 Wiktionary에서 단어를 불러오지 못했습니다.");
+  }
+
+  return parseEnglishWiktionaryHtml(page.title, parseData.parse.text["*"] as string);
 }

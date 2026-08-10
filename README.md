@@ -5,10 +5,11 @@
 ## 현재 구현된 기반 기능
 
 - 영어 Wiktionary MediaWiki API + Cheerio 기반 독일어 뜻·어원·관사 추출
-- Etymology의 `Equivalent to … + …` 링크를 따르는 형태소 분해
-- 분해된 요소를 클릭해 다시 조회하는 재귀 탐색 흐름
+- Etymology의 `Equivalent to … + …` 또는 링크 기반 `… + …` 표기를 따르는 형태소 분해
+- 대소문자 후보를 canonical page ID로 해석하는 명사·동사·형용사·접사 통합 조회
+- URL/브라우저 히스토리와 동기화되는 단계형 재귀 탐색 흐름
 - `der`(파랑), `die`(분홍), `das`(초록) 관사 표시
-- 브라우저 Local Storage 기반 즐겨찾기
+- 브라우저 Local Storage 기반 표 형태 단어장 탭
 - 즐겨찾기와 CEFR 난이도(A1–B2)를 사용하는 AI 예문/빈칸 퀴즈 API
 
 > 형태소 분해는 영어 Wiktionary가 현대 독일어 분해식을 명시한 경우에만 제공합니다. 문자열 모양만 보고 접사를 추측하지 않습니다.

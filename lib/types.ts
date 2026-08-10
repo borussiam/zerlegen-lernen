@@ -25,6 +25,7 @@ export interface FavoriteWord {
   word: string;
   article: Article;
   meaning: string;
+  decomposition?: string;
 }
 
 export interface GeneratedExercise {
