@@ -105,6 +105,23 @@ describe("parseEnglishWiktionaryHtml", () => {
     expect(result.morphemes.map((part) => part.lookup)).toEqual(["lehren", "-er"]);
     expect(result.morphemes[1].targetUrl).toBe("https://en.wiktionary.org/wiki/-er#German");
   });
+
+  it("maps plural-only nouns to the German plural article and grammar", () => {
+    const html = entryHtml(`
+      <div class="mw-heading mw-heading3"><h3>Noun</h3></div>
+      <p class="headword-line"><span class="gender"><abbr>pl</abbr></span></p>
+      <ol><li>people</li></ol>
+    `);
+
+    const result = parseEnglishWiktionaryHtml("Leute", html);
+
+    expect(result.article).toBe("die");
+    expect(result.examples).toEqual([{
+      sentence: "Die Leute sind in diesem Zusammenhang wichtig.",
+      translation: null,
+      source: "generated",
+    }]);
+  });
 });
 
 describe("parseGermanWord", () => {

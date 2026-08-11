@@ -163,7 +163,12 @@ function addExample(examples: WordExample[], sentence: string, translation: stri
   });
 }
 
-function generatedExample(word: string, partOfSpeech: string | null, article: Article): WordExample {
+function generatedExample(
+  word: string,
+  partOfSpeech: string | null,
+  article: Article,
+  pluralOnly = false,
+): WordExample {
   const normalizedPart = partOfSpeech?.toLowerCase() ?? "";
   let sentence: string;
 
@@ -175,6 +180,8 @@ function generatedExample(word: string, partOfSpeech: string | null, article: Ar
     sentence = `Das Beispiel ist ${word}.`;
   } else if (normalizedPart.includes("verb")) {
     sentence = `Ich möchte das Verb „${word}“ lernen.`;
+  } else if (pluralOnly) {
+    sentence = `Die ${word} sind in diesem Zusammenhang wichtig.`;
   } else if (article) {
     sentence = `${article[0].toLocaleUpperCase("de-DE")}${article.slice(1)} ${word} ist in diesem Zusammenhang wichtig.`;
   } else {
@@ -310,6 +317,7 @@ function extractDefinitions($: cheerio.CheerioAPI) {
   const examples: WordExample[] = [];
   let partOfSpeech: string | null = null;
   let article: Article = null;
+  let pluralOnly = false;
 
   for (const heading of $("h3, h4, h5").toArray()) {
     const headingText = clean($(heading).text());
@@ -323,6 +331,10 @@ function extractDefinitions($: cheerio.CheerioAPI) {
       if (gender.startsWith("m")) article = "der";
       else if (gender.startsWith("f")) article = "die";
       else if (gender.startsWith("n")) article = "das";
+      else if (gender.startsWith("p")) {
+        article = "die";
+        pluralOnly = true;
+      }
     }
 
     contents.filter("ol").first().children("li").each((_, item) => {
@@ -346,7 +358,7 @@ function extractDefinitions($: cheerio.CheerioAPI) {
     });
   }
 
-  return { article, partOfSpeech, meanings, examples };
+  return { article, partOfSpeech, meanings, examples, pluralOnly };
 }
 
 export function parseEnglishWiktionaryHtml(word: string, html: string): ParseResult {
@@ -362,7 +374,7 @@ export function parseEnglishWiktionaryHtml(word: string, html: string): ParseRes
 
   const germanHtml = germanHeading.nextUntil(".mw-heading2").toString();
   const $ = cheerio.load(`<section id="german-entry">${germanHtml}</section>`);
-  const { article, partOfSpeech, meanings, examples } = extractDefinitions($);
+  const { article, partOfSpeech, meanings, examples, pluralOnly } = extractDefinitions($);
   const { etymology, morphemes } = extractModernEtymology($);
   const standaloneKind = getMorphemeKind(word);
   const resolvedMorphemes = morphemes.length
@@ -382,7 +394,7 @@ export function parseEnglishWiktionaryHtml(word: string, html: string): ParseRes
     article,
     partOfSpeech,
     meanings: meanings.length ? meanings : ["사전에서 정의를 자동 추출하지 못했습니다."],
-    examples: examples.length ? examples : [generatedExample(word, partOfSpeech, article)],
+    examples: examples.length ? examples : [generatedExample(word, partOfSpeech, article, pluralOnly)],
     etymology,
     morphemes: resolvedMorphemes,
     sourceUrl: `${WIKTIONARY_ORIGIN}/wiki/${encodeURIComponent(word)}#German`,

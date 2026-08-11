@@ -232,6 +232,7 @@ async function main() {
   const candidates = await fetchCandidates();
   const checkpoint = await loadCheckpoint();
   const acceptedWords = new Set(checkpoint.words.map((word) => word.word.normalize("NFC")));
+  let nextAttemptAt = Date.now();
   console.log(`후보 ${candidates.length}개, 기존 성공 ${checkpoint.words.length}개부터 시작합니다.`);
 
   for (let index = checkpoint.nextCandidateIndex; index < candidates.length; index += 1) {
@@ -239,6 +240,9 @@ async function main() {
     checkpoint.nextCandidateIndex = index + 1;
     if (checkpoint.levelCounts[candidate.level] >= LEVEL_QUOTAS[candidate.level]) continue;
 
+    const waitTime = Math.max(0, nextAttemptAt - Date.now());
+    if (waitTime) await delay(waitTime);
+    nextAttemptAt = Date.now() + REQUEST_DELAY_MS;
     checkpoint.attempted += 1;
     try {
       const result = await parseGermanWord(candidate.word);
@@ -261,7 +265,6 @@ async function main() {
           + `B1 ${checkpoint.levelCounts.B1}, B2 ${checkpoint.levelCounts.B2}`,
         );
       }
-      await delay(REQUEST_DELAY_MS);
     }
 
     if (checkpoint.words.length === TARGET_COUNT) break;
