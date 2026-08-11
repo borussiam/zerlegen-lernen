@@ -3,12 +3,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FocusEvent, FormEvent, KeyboardEvent } from "react";
 import type { Article, CefrLevel, FavoriteType, FavoriteWord, GeneratedExercise, Morpheme, ParseResult, VocabularyIndexEntry } from "@/lib/types";
-import { filterAndSortFavorites, getFavoriteTypes, matchVocabulary } from "@/lib/vocabulary";
-import type { FavoriteFilter, FavoriteSort } from "@/lib/vocabulary";
+import { filterAndSortFavorites, getFavoriteTypes, isAffixWord, matchVocabulary, vocabularyForRandom } from "@/lib/vocabulary";
+import type { FavoriteFilter, FavoriteSort, RandomLevelRange } from "@/lib/vocabulary";
 
 const STORAGE_KEY = "zerlegen-lernen:favorites";
 const HISTORY_KEY = "zerlegen-lernen:results";
-const WORD_CACHE_KEY = "zerlegen-lernen:word-cache:v5";
+const WORD_CACHE_KEY = "zerlegen-lernen:word-cache:v6";
 const WORD_CACHE_TTL_MS = 24 * 60 * 60 * 1_000;
 const WORD_CACHE_MAX_ENTRIES = 100;
 const CLIENT_REQUEST_DELAY_MS = 175;
@@ -122,6 +122,17 @@ function isFavoriteWord(value: unknown): value is FavoriteWord {
   if (!value || typeof value !== "object") return false;
   const item = value as Partial<FavoriteWord>;
   return typeof item.word === "string" && typeof item.meaning === "string";
+}
+
+function vocabularyEntryFromResult(result: ParseResult): VocabularyIndexEntry {
+  return {
+    word: result.word,
+    article: result.article,
+    partOfSpeech: result.partOfSpeech,
+    level: result.level ?? null,
+    meaning: result.meanings[0] ?? "",
+    articleReason: result.articleReason,
+  };
 }
 
 function LevelBadge({ level }: { level?: CefrLevel | null }) {
@@ -269,7 +280,7 @@ async function requestWord(word: string) {
   const existingRequest = inFlightWordRequests.get(key);
   if (existingRequest) return existingRequest;
 
-  const request = fetch(`/api/parse?word=${encodeURIComponent(key)}&v=5`, {
+  const request = fetch(`/api/parse?word=${encodeURIComponent(key)}&v=6`, {
     headers: { Accept: "application/json" },
   }).then(async (response) => {
     const data = await response.json();
@@ -293,9 +304,13 @@ interface ChildPreview {
 function MorphemeComparisonGrid({
   parts,
   onExplore,
+  hasFavoriteType,
+  onToggleFavorite,
 }: {
   parts: Morpheme[];
   onExplore: (word: string) => void;
+  hasFavoriteType: (word: string, type: FavoriteType) => boolean;
+  onToggleFavorite: (result: ParseResult, type: FavoriteType) => void;
 }) {
   const [previews, setPreviews] = useState<ChildPreview[]>([]);
 
@@ -341,7 +356,6 @@ function MorphemeComparisonGrid({
         {parts.map((part, index) => {
           const preview = previews[index];
           const child = preview?.result;
-          const terminal = child ? isTerminalResult(child) : false;
 
           return (
             <article key={`${part.lookup}-${index}`} className="rounded-2xl border border-ink/10 bg-paper/65 p-5">
@@ -350,7 +364,12 @@ function MorphemeComparisonGrid({
                   <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-ink/40">{part.kind}</p>
                   <h4 className="mt-1 font-serif text-2xl font-bold text-moss">{part.text}</h4>
                 </div>
-                {terminal && <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-bold text-emerald-800">분해 완료</span>}
+                {child && (
+                  <div className="flex items-center gap-2">
+                    <FavoriteToggle compact type="meaning" active={hasFavoriteType(child.word, "meaning")} onClick={() => onToggleFavorite(child, "meaning")} />
+                    <FavoriteToggle compact type="article" active={hasFavoriteType(child.word, "article")} disabled={!child.article} onClick={() => onToggleFavorite(child, "article")} />
+                  </div>
+                )}
               </div>
 
               {!preview && <p className="mt-5 animate-pulse text-sm text-ink/40">요소 정보를 불러오는 중…</p>}
@@ -374,11 +393,7 @@ function MorphemeComparisonGrid({
                     ))}
                   </div>
                   <p className="mt-4 border-l-2 border-coral/40 pl-3 text-sm italic leading-6 text-ink/60">{child.examples[0]?.sentence}</p>
-                  {terminal ? (
-                    <p className="mt-5 text-xs font-bold text-emerald-800">더 세분화된 현대 독일어 분해식이 없습니다.</p>
-                  ) : (
-                    <button type="button" onClick={() => onExplore(child.word)} className="mt-5 rounded-full border border-ink/15 bg-white px-3 py-2 text-xs font-bold transition hover:border-moss hover:text-moss">이 요소를 탐색 경로에 추가 →</button>
-                  )}
+                  <button type="button" onClick={() => onExplore(child.word)} className="mt-5 rounded-full border border-ink/15 bg-white px-4 py-2 text-xs font-bold transition hover:border-moss hover:text-moss">자세히 보기 →</button>
                 </>
               )}
             </article>
@@ -398,6 +413,7 @@ export function WordWorkbench() {
   const [autocompleteIndex, setAutocompleteIndex] = useState(-1);
   const [favoriteFilter, setFavoriteFilter] = useState<FavoriteFilter>("all");
   const [favoriteSort, setFavoriteSort] = useState<FavoriteSort>("recent");
+  const [randomLevelRange, setRandomLevelRange] = useState<RandomLevelRange>("A1-B2");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [level, setLevel] = useState<CefrLevel>("A2");
@@ -437,6 +453,10 @@ export function WordWorkbench() {
     () => vocabulary.filter((item) => item.level === level && Boolean(item.article)).length,
     [level, vocabulary],
   );
+  const randomCandidates = useMemo(
+    () => vocabularyForRandom(vocabulary, randomLevelRange),
+    [randomLevelRange, vocabulary],
+  );
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -449,6 +469,7 @@ export function WordWorkbench() {
           setFavorites(stored.map((item, index) => ({
             ...item,
             favoriteTypes: getFavoriteTypes(item),
+            level: isAffixWord(item.word, item.partOfSpeech) ? null : item.level,
             addedAt: item.addedAt ?? now - ((stored.length - index) * 1_000),
           })));
         }
@@ -484,6 +505,11 @@ export function WordWorkbench() {
     setFavorites((current) => {
       let changed = false;
       const next = current.map((item) => {
+        if (isAffixWord(item.word, item.partOfSpeech)) {
+          if (item.level === null) return item;
+          changed = true;
+          return { ...item, level: null };
+        }
         if (item.level) return item;
         const levelForWord = levels.get(normalizedWord(item.word));
         if (!levelForWord) return item;
@@ -655,6 +681,15 @@ export function WordWorkbench() {
     setError("");
     try {
       const data = await requestWord(cleanWord);
+      const entry = vocabularyEntryFromResult(data);
+      const entryKey = normalizedWord(entry.word);
+      setVocabulary((current) => {
+        const existingIndex = current.findIndex((item) => normalizedWord(item.word) === entryKey);
+        if (existingIndex < 0) return [...current, entry];
+        const next = [...current];
+        next[existingIndex] = entry;
+        return next;
+      });
       syncFavoriteData(data);
       pushResults([...parents, data]);
       setActiveTab("explore");
@@ -678,8 +713,8 @@ export function WordWorkbench() {
   }
 
   function searchRandomWord() {
-    if (!vocabulary.length) return;
-    const random = vocabulary[Math.floor(Math.random() * vocabulary.length)];
+    if (!randomCandidates.length) return;
+    const random = randomCandidates[Math.floor(Math.random() * randomCandidates.length)];
     if (random) void search(random.word);
   }
 
@@ -955,7 +990,17 @@ export function WordWorkbench() {
                     </div>
                   )}
                 </div>
-                <button type="button" disabled={!vocabulary.length || loading} onClick={searchRandomWord} className="flex-1 whitespace-nowrap rounded-2xl border border-orange-300 bg-orange-50 px-4 py-3 font-bold text-orange-800 transition hover:bg-orange-100 disabled:opacity-40 sm:flex-none">랜덤 단어</button>
+                <label htmlFor="random-level-range" className="sr-only">랜덤 단어 난이도 범위</label>
+                <select suppressHydrationWarning id="random-level-range" value={randomLevelRange} onChange={(event) => setRandomLevelRange(event.target.value as RandomLevelRange)} className="rounded-2xl border border-orange-300 bg-white px-3 py-3 text-sm font-bold text-orange-800 outline-none focus:ring-4 focus:ring-orange-200">
+                  <option value="A1-B2">A1–B2</option>
+                  <option value="A1-A2">A1–A2</option>
+                  <option value="B1-B2">B1–B2</option>
+                  <option value="A1">A1</option>
+                  <option value="A2">A2</option>
+                  <option value="B1">B1</option>
+                  <option value="B2">B2</option>
+                </select>
+                <button type="button" disabled={!randomCandidates.length || loading} onClick={searchRandomWord} className="flex-1 whitespace-nowrap rounded-2xl border border-orange-300 bg-orange-50 px-4 py-3 font-bold text-orange-800 transition hover:bg-orange-100 disabled:opacity-40 sm:flex-none">랜덤 단어</button>
                 <button type="submit" disabled={loading} className="flex-1 whitespace-nowrap rounded-2xl bg-ink px-5 py-3 font-bold text-white transition hover:bg-moss disabled:opacity-50 sm:flex-none">{loading ? "검색 중…" : "검색"}</button>
               </div>
             </form>
@@ -1024,7 +1069,6 @@ export function WordWorkbench() {
                             )}
                           </div>
                         ))}
-                        {terminal && <span className="ml-1 rounded-full bg-emerald-100 px-3 py-1.5 text-xs font-bold text-emerald-900">✓ 분해 완료</span>}
                       </div>
                       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-ink/45">
                         <a href={result.sourceUrl} target="_blank" rel="noreferrer" className="font-bold underline decoration-moss/30 underline-offset-4">Wiktionary 원문 ↗</a>
@@ -1054,6 +1098,8 @@ export function WordWorkbench() {
                           key={`${result.word}:${selectedParts.map((part) => part.lookup).join("+")}`}
                           parts={selectedParts}
                           onExplore={(word) => void search(word, results.slice(0, resultIndex + 1))}
+                          hasFavoriteType={hasFavoriteType}
+                          onToggleFavorite={toggleFavoriteType}
                         />
                       )}
                     </section>
@@ -1127,7 +1173,7 @@ export function WordWorkbench() {
                                   </span>
                                 ))}
                               </div>
-                            ) : <span className="text-ink/35">{item.morphemes?.length || item.decomposition ? "분해 완료" : "—"}</span>}
+                            ) : <span className="text-ink/35">—</span>}
                           </td>
                           <td className="max-w-xs px-5 py-5 text-xs leading-5 text-ink/55 lg:pr-12">{articleReasonText(item.articleReason, item.article) ?? "-"}</td>
                         </tr>
@@ -1275,7 +1321,6 @@ export function WordWorkbench() {
                 <p className="mt-3 line-clamp-3 text-xs leading-5 text-ink/65">{favoritePopover.result.meanings[0]}</p>
                 <div className="mt-3 flex flex-wrap items-center gap-1.5">
                   {favoritePopover.result.morphemes.map((part, index) => <span key={`${part.lookup}-${index}`} className="flex items-center gap-2 text-sm font-bold text-moss">{index > 0 && <span className="text-ink/25">+</span>}<span className="rounded-lg bg-moss/5 px-2.5 py-1.5">{part.text}</span></span>)}
-                  {isTerminalResult(favoritePopover.result) && <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-[11px] font-bold text-emerald-900">분해 완료</span>}
                 </div>
                 <button type="button" onClick={() => openFavorite(favoritePopover.result!.word)} className="mt-4 w-full rounded-xl bg-ink px-4 py-2.5 text-xs font-bold text-white transition hover:bg-moss">메인 검색창에서 상세 검색 →</button>
               </>

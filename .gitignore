@@ -35,6 +35,8 @@ next-env.d.ts
 
 # resumable vocabulary build state
 .cache/
+/data/runtime-vocabulary.json
+/data/runtime-vocabulary.json.tmp
 
 # deployment
 .vercel

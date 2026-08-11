@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getPreParsedWord } from "@/lib/preparsed-words";
+import { getPreParsedWord, registerParsedWord } from "@/lib/preparsed-words";
 import { parseGermanWord } from "@/lib/wiktionary";
 
 export const runtime = "nodejs";
@@ -13,7 +13,8 @@ export async function GET(request: NextRequest) {
 
   try {
     const preParsed = await getPreParsedWord(word);
-    return NextResponse.json(preParsed ?? await parseGermanWord(word), {
+    const result = preParsed ?? await registerParsedWord(await parseGermanWord(word));
+    return NextResponse.json(result, {
       headers: {
         "Cache-Control": "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800",
         "X-Zerlegen-Cache": preParsed ? "pre-parsed" : "wiktionary",

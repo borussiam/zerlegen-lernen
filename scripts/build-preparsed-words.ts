@@ -25,12 +25,13 @@ interface SourceWord {
 
 interface CandidateWord {
   word: string;
-  level: CefrLevel;
+  level: CefrLevel | null;
+  quotaLevel: CefrLevel;
   sourceRank: number | null;
 }
 
 interface PreParsedWord extends ParseResult {
-  level: CefrLevel;
+  level: CefrLevel | null;
   sourceRank: number | null;
 }
 
@@ -46,7 +47,7 @@ interface BuildOutput {
   meta: {
     generatedAt: string;
     count: number;
-    levels: Record<CefrLevel, number>;
+    levels: Record<CefrLevel, number> & { unclassified: number };
     requestDelayMs: number;
     dictionary: string;
     candidateSource: string;
@@ -67,13 +68,13 @@ const AFFIX_CANDIDATES: CandidateWord[] = [
   "ab-", "an-", "auf-", "aus-", "be-", "bei-", "ein-", "ent-", "er-", "fort-",
   "ge-", "her-", "hin-", "los-", "miss-", "mit-", "nach-", "nieder-", "un-", "ur-",
   "ver-", "vor-", "weg-", "weiter-", "zer-", "zu-", "zurück-", "zusammen-",
-].map((word) => ({ word, level: "B1", sourceRank: null }));
+].map((word) => ({ word, level: null, quotaLevel: "B1" as const, sourceRank: null }));
 
 AFFIX_CANDIDATES.push(...[
   "-bar", "-chen", "-ei", "-er", "-haft", "-heit", "-ig", "-in", "-ion", "-isch",
   "-ismus", "-ist", "-ität", "-keit", "-lein", "-lich", "-ling", "-los", "-ment",
   "-nis", "-sam", "-schaft", "-tum", "-ung", "-weise",
-].map((word) => ({ word, level: "B2" as const, sourceRank: null })));
+].map((word) => ({ word, level: null, quotaLevel: "B2" as const, sourceRank: null })));
 
 const ALLOWED_SOURCE_PARTS = new Set(["noun", "verb", "adjective", "prefix", "suffix", "affix"]);
 const ALLOWED_PARSED_PARTS = /^(?:Noun|Verb|Adjective|Prefix|Suffix|Affix)$/i;
@@ -121,6 +122,7 @@ async function fetchCandidates() {
     byLevel.get(item.cefr_level)?.push({
       word: item.word.normalize("NFC"),
       level: item.cefr_level,
+      quotaLevel: item.cefr_level,
       sourceRank: typeof item.word_frequency === "number" ? item.word_frequency : null,
     });
   }
@@ -129,7 +131,7 @@ async function fetchCandidates() {
   const candidates: CandidateWord[] = [];
   for (const level of Object.keys(LEVEL_QUOTAS) as CefrLevel[]) {
     const levelCandidates = [
-      ...AFFIX_CANDIDATES.filter((candidate) => candidate.level === level),
+      ...AFFIX_CANDIDATES.filter((candidate) => candidate.quotaLevel === level),
       ...(byLevel.get(level) ?? []).sort((left, right) => (
         (left.sourceRank ?? Number.MAX_SAFE_INTEGER) - (right.sourceRank ?? Number.MAX_SAFE_INTEGER)
       )),
@@ -205,11 +207,19 @@ async function recordError(candidate: CandidateWord, error: unknown) {
 }
 
 async function writeFinalOutput(checkpoint: BuildCheckpoint) {
+  const actualLevelCounts = checkpoint.words.reduce<Record<CefrLevel, number> & { unclassified: number }>(
+    (counts, word) => {
+      if (word.level) counts[word.level] += 1;
+      else counts.unclassified += 1;
+      return counts;
+    },
+    { ...emptyLevelCounts(), unclassified: 0 },
+  );
   const output: BuildOutput = {
     meta: {
       generatedAt: new Date().toISOString(),
       count: checkpoint.words.length,
-      levels: checkpoint.levelCounts,
+      levels: actualLevelCounts,
       requestDelayMs: REQUEST_DELAY_MS,
       dictionary: "English Wiktionary (German entries)",
       candidateSource: CANDIDATE_SOURCE_URL,
@@ -238,7 +248,7 @@ async function main() {
   for (let index = checkpoint.nextCandidateIndex; index < candidates.length; index += 1) {
     const candidate = candidates[index];
     checkpoint.nextCandidateIndex = index + 1;
-    if (checkpoint.levelCounts[candidate.level] >= LEVEL_QUOTAS[candidate.level]) continue;
+    if (checkpoint.levelCounts[candidate.quotaLevel] >= LEVEL_QUOTAS[candidate.quotaLevel]) continue;
 
     const waitTime = Math.max(0, nextAttemptAt - Date.now());
     if (waitTime) await delay(waitTime);
@@ -251,7 +261,7 @@ async function main() {
       if (acceptedWords.has(resultKey)) throw new Error("이미 저장된 표제어입니다.");
 
       checkpoint.words.push({ ...result, level: candidate.level, sourceRank: candidate.sourceRank });
-      checkpoint.levelCounts[candidate.level] += 1;
+      checkpoint.levelCounts[candidate.quotaLevel] += 1;
       acceptedWords.add(resultKey);
     } catch (error) {
       checkpoint.failed += 1;

@@ -5,8 +5,9 @@
     "levels": {
       "A1": 400,
       "A2": 600,
-      "B1": 750,
-      "B2": 750
+      "B1": 722,
+      "B2": 726,
+      "unclassified": 52
     },
     "requestDelayMs": 1500,
     "dictionary": "English Wiktionary (German entries)",
@@ -36700,7 +36701,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/ab-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -36744,7 +36745,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/an-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -36784,7 +36785,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/auf-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -36814,7 +36815,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/aus-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -36845,7 +36846,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/be-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -36879,7 +36880,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/bei-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -36910,7 +36911,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/ein-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -36943,7 +36944,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/ent-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -36983,7 +36984,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/er-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37013,7 +37014,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/fort-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37057,7 +37058,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/ge-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37088,7 +37089,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/her-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37129,7 +37130,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/hin-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37170,7 +37171,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/los-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37210,7 +37211,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/miss-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37251,7 +37252,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/mit-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37295,7 +37296,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/nach-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37331,7 +37332,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/nieder-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37372,7 +37373,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/un-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37415,7 +37416,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/ur-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37459,7 +37460,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/ver-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37500,7 +37501,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/vor-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37530,7 +37531,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/weg-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37560,7 +37561,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/weiter-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37591,7 +37592,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/zer-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37622,7 +37623,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/zu-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37652,7 +37653,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/zur%C3%BCck-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -37696,7 +37697,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/zusammen-#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B1",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -64486,7 +64487,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-bar#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -64526,7 +64527,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-chen#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -64564,7 +64565,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-ei#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -64608,7 +64609,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-er#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -64649,7 +64650,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-haft#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -64690,7 +64691,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-heit#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -64734,7 +64735,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-ig#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -64776,7 +64777,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-in#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -64806,7 +64807,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-ion#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -64837,7 +64838,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-isch#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -64867,7 +64868,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-ismus#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -64907,7 +64908,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-ist#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -64937,7 +64938,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-it%C3%A4t#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -64967,7 +64968,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-keit#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -64997,7 +64998,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-lein#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -65041,7 +65042,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-lich#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -65083,7 +65084,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-ling#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -65113,7 +65114,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-los#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -65144,7 +65145,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-nis#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -65185,7 +65186,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-sam#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -65220,7 +65221,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-schaft#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -65250,7 +65251,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-tum#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -65290,7 +65291,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-ung#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
@@ -65331,7 +65332,7 @@
       "sourceUrl": "https://en.wiktionary.org/wiki/-weise#German",
       "compoundHint": null,
       "articleReason": null,
-      "level": "B2",
+      "level": null,
       "sourceRank": null
     },
     {
