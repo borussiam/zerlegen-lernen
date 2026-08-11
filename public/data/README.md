@@ -12,6 +12,13 @@ which attributes its frequency data to
 revision recorded in the JSON metadata. Candidate data is only used to choose
 which entries to parse; dictionary fields are not copied from that deck.
 
+Prefixes and suffixes deliberately use `level: null` and are excluded from
+random-word selection. Words parsed after an uncached search are added to the
+runtime vocabulary overlay (`data/runtime-vocabulary.json` in writable local
+environments). Their provisional A2–B2 level is inferred conservatively from
+word length, decomposition complexity, and any known component levels; it is
+not an official CEFR classification.
+
 The derived data is distributed under
 [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/). English
 Wiktionary attribution and licensing details are available on its
