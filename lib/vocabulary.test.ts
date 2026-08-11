@@ -42,6 +42,11 @@ describe("matchVocabulary", () => {
       "unfreundlich",
     ]);
   });
+
+  it("returns no suggestions for blank input and respects the result limit", () => {
+    expect(matchVocabulary(vocabulary, "   ")).toEqual([]);
+    expect(matchVocabulary(vocabulary, "freund", 2)).toHaveLength(2);
+  });
 });
 
 describe("filterAndSortFavorites", () => {
@@ -65,6 +70,15 @@ describe("filterAndSortFavorites", () => {
       "Zeitung",
     ]);
   });
+
+  it("filters meaning-only stars and treats legacy favorites as meaning stars", () => {
+    const withLegacy = [...favorites, { word: "Alt", article: null, meaning: "old", addedAt: 4 }];
+    expect(filterAndSortFavorites(withLegacy, "meaning", "recent").map((item) => item.word)).toEqual([
+      "Alt",
+      "Haus",
+      "Zeitung",
+    ]);
+  });
 });
 
 describe("vocabulary difficulty and random selection", () => {
@@ -82,6 +96,13 @@ describe("vocabulary difficulty and random selection", () => {
     expect(vocabularyForRandom(vocabulary, "A1-B2").map((entry) => entry.word)).not.toContain("-keit");
     expect(vocabularyForRandom(vocabulary, "A1-A2").map((entry) => entry.word)).toEqual(["freundlich"]);
     expect(vocabularyForRandom(vocabulary, "B1").map((entry) => entry.word)).toEqual([
+      "Freundlichkeit",
+      "unfreundlich",
+    ]);
+  });
+
+  it("supports upper-level ranges without leaking A-level words", () => {
+    expect(vocabularyForRandom(vocabulary, "B1-B2").map((entry) => entry.word)).toEqual([
       "Freundlichkeit",
       "unfreundlich",
     ]);

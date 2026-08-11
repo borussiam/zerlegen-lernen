@@ -2,7 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FocusEvent, FormEvent, KeyboardEvent } from "react";
-import type { Article, CefrLevel, FavoriteType, FavoriteWord, GeneratedExercise, Morpheme, ParseResult, VocabularyIndexEntry } from "@/lib/types";
+import type { CefrLevel, FavoriteType, FavoriteWord, GeneratedExercise, Morpheme, ParseResult, VocabularyIndexEntry } from "@/lib/types";
+import { articleReasonText, buildArticleQuizQuestions, isCorrectArticleAnswer, shuffleItems } from "@/lib/article-quiz";
+import type { ArticleQuizMode, ArticleQuizQuestion, DefiniteArticle } from "@/lib/article-quiz";
 import { filterAndSortFavorites, getFavoriteTypes, isAffixWord, matchVocabulary, vocabularyForRandom } from "@/lib/vocabulary";
 import type { FavoriteFilter, FavoriteSort, RandomLevelRange } from "@/lib/vocabulary";
 
@@ -25,18 +27,6 @@ const levelStyle: Record<CefrLevel, string> = {
   B1: "border-amber-300 bg-amber-50 text-amber-900",
   B2: "border-violet-300 bg-violet-50 text-violet-800",
 };
-
-type DefiniteArticle = Exclude<Article, null>;
-
-interface ArticleQuizQuestion {
-  word: string;
-  article: DefiniteArticle;
-  meaning: string;
-  reason: string;
-  level: CefrLevel | null;
-}
-
-type ArticleQuizMode = "favorites" | "database";
 
 interface FavoritePartPopover {
   owner: string;
@@ -98,16 +88,6 @@ function favoriteFromResult(
     level: result.level ?? existing?.level ?? null,
     addedAt: existing?.addedAt ?? Date.now(),
   };
-}
-
-function articleReasonText(reason: string | null | undefined, article: Article) {
-  const cleaned = reason
-    ?.replace(/\s*영어 Wiktionary의 이 항목(?:도|은) [^.]+표기합니다\./g, "")
-    .replace(/영어 Wiktionary의 독일어 명사 성 표기에 따라 [^.]+사용합니다\.\s*/g, "")
-    .replace(/Wiktionary의 성 표기에 따라 [^.]+사용합니다\.\s*/g, "")
-    .trim();
-  if (!cleaned || !article || /뚜렷한|확실한 .*규칙이 없|관사 (?:der|die|das)와 단어를 함께/.test(cleaned)) return null;
-  return cleaned;
 }
 
 function isVocabularyEntry(value: unknown): value is VocabularyIndexEntry {
@@ -190,15 +170,6 @@ function FavoriteToggle({
       {!compact && <span>{label}</span>}
     </button>
   );
-}
-
-function shuffled<T>(items: T[]) {
-  const next = [...items];
-  for (let index = next.length - 1; index > 0; index -= 1) {
-    const target = Math.floor(Math.random() * (index + 1));
-    [next[index], next[target]] = [next[target], next[index]];
-  }
-  return next;
 }
 
 function resultsFromHistoryState(state: unknown) {
@@ -792,38 +763,12 @@ export function WordWorkbench() {
   }
 
   function startArticleQuiz() {
-    const savedQuestions = favorites.flatMap((item): ArticleQuizQuestion[] => (
-      item.article
-        ? [{
-            word: item.word,
-            article: item.article,
-            meaning: item.meaning,
-            reason: articleReasonText(item.articleReason, item.article) ?? "-",
-            level: item.level ?? null,
-          }]
-        : []
-    ));
-    const databaseQuestions = vocabulary.flatMap((item): ArticleQuizQuestion[] => (
-      item.article && item.level === level
-        ? [{
-            word: item.word,
-            article: item.article,
-            meaning: item.meaning,
-            reason: articleReasonText(item.articleReason, item.article) ?? "-",
-            level: item.level,
-          }]
-        : []
-    ));
-    const unique = new Map<string, ArticleQuizQuestion>();
-    const source = articleQuizMode === "favorites" ? savedQuestions : databaseQuestions;
-    source.forEach((question) => {
-      const key = normalizedWord(question.word);
-      if (!unique.has(key)) unique.set(key, {
-        ...question,
-        reason: articleReasonText(question.reason, question.article) ?? "-",
-      });
+    const next = buildArticleQuizQuestions({
+      mode: articleQuizMode,
+      level,
+      favorites,
+      vocabulary,
     });
-    const next = shuffled(Array.from(unique.values())).slice(0, 8);
     if (!next.length) {
       setError(articleQuizMode === "favorites"
         ? "관사가 있는 단어를 단어장에 먼저 저장해 주세요."
@@ -846,10 +791,10 @@ export function WordWorkbench() {
   function answerArticle(answer: DefiniteArticle) {
     if (articleAnswer) return;
     setArticleAnswer(answer);
-    if (answer === articleQuestions[articleQuestionIndex]?.article) {
+    const question = articleQuestions[articleQuestionIndex];
+    if (question && isCorrectArticleAnswer(question, answer)) {
       setArticleScore((score) => score + 1);
     } else {
-      const question = articleQuestions[articleQuestionIndex];
       if (question) setWrongArticleQuestions((items) => [...items, question]);
     }
   }
@@ -865,7 +810,7 @@ export function WordWorkbench() {
   }
 
   function retryWrongArticles() {
-    setArticleQuestions(shuffled(wrongArticleQuestions));
+    setArticleQuestions(shuffleItems(wrongArticleQuestions));
     setArticleQuestionIndex(0);
     setArticleAnswer(null);
     setArticleScore(0);
@@ -1082,11 +1027,11 @@ export function WordWorkbench() {
                       </div>
 
                       <div className="mt-7 rounded-2xl border border-coral/15 bg-coral/5 p-5">
-                        <h3 className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-coral">Beispiel · 예문</h3>
+                        <h3 className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-coral">{result.examples.some((example) => example.kind === "word") ? "Beispielwörter · 예시 단어" : "Beispiel · 예문"}</h3>
                         <ul className="space-y-4">
                           {result.examples.map((example, index) => (
                             <li key={`${example.sentence}-${index}`} className="text-sm leading-6 text-ink/75">
-                              <p className="font-medium">„{example.sentence}“</p>
+                              <p className="font-medium">{example.kind === "word" ? example.sentence : `„${example.sentence}“`}</p>
                               {example.translation && <p className="mt-1 text-ink/50">{example.translation}</p>}
                             </li>
                           ))}

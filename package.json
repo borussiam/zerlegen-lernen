@@ -9,7 +9,9 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "data:build": "tsx scripts/build-preparsed-words.ts"
+    "data:build": "tsx scripts/build-preparsed-words.ts",
+    "data:audit": "tsx scripts/audit-vocabulary-data.ts",
+    "data:expand-b1": "tsx scripts/expand-b1-vocabulary.ts"
   },
   "dependencies": {
     "axios": "^1.7.9",
@@ -25,6 +27,7 @@
     "autoprefixer": "^10.4.20",
     "eslint": "^9.18.0",
     "eslint-config-next": "^16.3.0",
+    "pdf-parse": "^2.4.5",
     "postcss": "^8.5.1",
     "tailwindcss": "^3.4.17",
     "tsx": "^4.23.12",

@@ -22,6 +22,7 @@ export interface WordExample {
    */
   translation: string | null;
   source: "wiktionary" | "generated";
+  kind?: "sentence" | "word";
 }
 
 export interface ParseResult {
