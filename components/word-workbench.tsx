@@ -1,7 +1,10 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
-import type { Article, FavoriteType, FavoriteWord, GeneratedExercise, Morpheme, ParseResult } from "@/lib/types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { FocusEvent, FormEvent, KeyboardEvent } from "react";
+import type { Article, CefrLevel, FavoriteType, FavoriteWord, GeneratedExercise, Morpheme, ParseResult, VocabularyIndexEntry } from "@/lib/types";
+import { filterAndSortFavorites, getFavoriteTypes, matchVocabulary } from "@/lib/vocabulary";
+import type { FavoriteFilter, FavoriteSort } from "@/lib/vocabulary";
 
 const STORAGE_KEY = "zerlegen-lernen:favorites";
 const HISTORY_KEY = "zerlegen-lernen:results";
@@ -16,6 +19,13 @@ const articleStyle = {
   das: "bg-emerald-100 text-emerald-700 border-emerald-200",
 };
 
+const levelStyle: Record<CefrLevel, string> = {
+  A1: "border-emerald-300 bg-emerald-50 text-emerald-800",
+  A2: "border-sky-300 bg-sky-50 text-sky-800",
+  B1: "border-amber-300 bg-amber-50 text-amber-900",
+  B2: "border-violet-300 bg-violet-50 text-violet-800",
+};
+
 type DefiniteArticle = Exclude<Article, null>;
 
 interface ArticleQuizQuestion {
@@ -23,7 +33,10 @@ interface ArticleQuizQuestion {
   article: DefiniteArticle;
   meaning: string;
   reason: string;
+  level: CefrLevel | null;
 }
+
+type ArticleQuizMode = "favorites" | "database";
 
 interface FavoritePartPopover {
   owner: string;
@@ -34,81 +47,6 @@ interface FavoritePartPopover {
   result?: ParseResult;
   error?: string;
 }
-
-const ARTICLE_QUIZ_POOL: Record<string, ArticleQuizQuestion[]> = {
-  A1: [
-    { word: "Tisch", article: "der", meaning: "탁자", reason: "뚜렷한 어미 규칙이 없어 der Tisch로 함께 익히는 것이 좋습니다." },
-    { word: "Schule", article: "die", meaning: "학교", reason: "-e로 끝나는 명사는 여성명사인 경우가 많지만 예외도 있습니다." },
-    { word: "Haus", article: "das", meaning: "집", reason: "뚜렷한 어미 규칙이 없어 das Haus로 함께 익히는 것이 좋습니다." },
-    { word: "Zeitung", article: "die", meaning: "신문", reason: "-ung로 끝나는 명사는 대체로 여성명사입니다." },
-    { word: "Mädchen", article: "das", meaning: "소녀", reason: "축소 접미사 -chen은 문법적으로 중성명사를 만듭니다." },
-    { word: "Mann", article: "der", meaning: "남자", reason: "자연 성별이 남성인 사람을 나타내는 기본 명사입니다." },
-    { word: "Frau", article: "die", meaning: "여자", reason: "자연 성별이 여성인 사람을 나타내는 기본 명사입니다." },
-    { word: "Kind", article: "das", meaning: "아이", reason: "자연 성별과 문법적 성은 다를 수 있으므로 das Kind로 익힙니다." },
-    { word: "Apfel", article: "der", meaning: "사과", reason: "뚜렷한 어미 규칙이 없어 der Apfel로 함께 익힙니다." },
-    { word: "Banane", article: "die", meaning: "바나나", reason: "-e로 끝나는 명사는 여성명사인 경우가 많습니다." },
-    { word: "Brot", article: "das", meaning: "빵", reason: "뚜렷한 어미 규칙이 없어 das Brot로 함께 익힙니다." },
-    { word: "Hund", article: "der", meaning: "개", reason: "뚜렷한 어미 규칙이 없어 der Hund로 함께 익힙니다." },
-    { word: "Katze", article: "die", meaning: "고양이", reason: "-e로 끝나는 명사는 여성명사인 경우가 많습니다." },
-    { word: "Auto", article: "das", meaning: "자동차", reason: "Auto는 Automobil의 줄임말이며 중성명사입니다." },
-    { word: "Buch", article: "das", meaning: "책", reason: "뚜렷한 어미 규칙이 없어 das Buch로 함께 익힙니다." },
-    { word: "Lampe", article: "die", meaning: "램프", reason: "-e로 끝나는 명사는 여성명사인 경우가 많습니다." },
-  ],
-  A2: [
-    { word: "Lehrer", article: "der", meaning: "교사", reason: "사람·행위자를 나타내는 접미사 -er 명사는 대체로 남성명사입니다." },
-    { word: "Wohnung", article: "die", meaning: "주택, 아파트", reason: "-ung로 끝나는 명사는 대체로 여성명사입니다." },
-    { word: "Möglichkeit", article: "die", meaning: "가능성", reason: "-keit로 끝나는 명사는 여성명사입니다." },
-    { word: "Museum", article: "das", meaning: "박물관", reason: "-um로 끝나는 차용 명사는 대체로 중성명사입니다." },
-    { word: "Garten", article: "der", meaning: "정원", reason: "뚜렷한 생산적 어미 규칙이 없어 der Garten으로 함께 익힙니다." },
-    { word: "Bahnhof", article: "der", meaning: "기차역", reason: "복합명사는 마지막 기본어 Hof의 남성 성을 따릅니다." },
-    { word: "Universität", article: "die", meaning: "대학교", reason: "-tät로 끝나는 명사는 여성명사입니다." },
-    { word: "Einladung", article: "die", meaning: "초대", reason: "-ung로 끝나는 명사는 대체로 여성명사입니다." },
-    { word: "Brötchen", article: "das", meaning: "작은 빵", reason: "축소 접미사 -chen은 중성명사를 만듭니다." },
-    { word: "Frühling", article: "der", meaning: "봄", reason: "-ling으로 끝나는 명사는 남성명사입니다." },
-    { word: "Instrument", article: "das", meaning: "도구, 악기", reason: "-ment로 끝나는 명사는 대체로 중성명사입니다." },
-    { word: "Gesundheit", article: "die", meaning: "건강", reason: "-heit로 끝나는 명사는 여성명사입니다." },
-    { word: "Fahrrad", article: "das", meaning: "자전거", reason: "복합명사는 마지막 기본어 Rad의 중성 성을 따릅니다." },
-    { word: "Computer", article: "der", meaning: "컴퓨터", reason: "이 차용어는 남성명사이므로 der Computer로 익힙니다." },
-    { word: "Reise", article: "die", meaning: "여행", reason: "-e로 끝나는 명사는 여성명사인 경우가 많습니다." },
-    { word: "Bäckerei", article: "die", meaning: "빵집", reason: "-ei로 끝나는 명사는 여성명사입니다." },
-  ],
-  B1: [
-    { word: "Freundlichkeit", article: "die", meaning: "친절함", reason: "-keit로 끝나는 명사는 여성명사입니다." },
-    { word: "Entscheidung", article: "die", meaning: "결정", reason: "-ung로 끝나는 명사는 대체로 여성명사입니다." },
-    { word: "Ergebnis", article: "das", meaning: "결과", reason: "뚜렷한 어미 규칙이 없어 das Ergebnis로 함께 익힙니다." },
-    { word: "Zusammenhang", article: "der", meaning: "연관, 맥락", reason: "복합명사의 성은 마지막 기본어 Hang의 남성 성을 따릅니다." },
-    { word: "Verhältnis", article: "das", meaning: "관계, 비율", reason: "뚜렷한 어미 규칙이 없어 das Verhältnis로 함께 익힙니다." },
-    { word: "Erfahrung", article: "die", meaning: "경험", reason: "-ung로 끝나는 명사는 대체로 여성명사입니다." },
-    { word: "Verantwortung", article: "die", meaning: "책임", reason: "-ung로 끝나는 명사는 대체로 여성명사입니다." },
-    { word: "Ereignis", article: "das", meaning: "사건", reason: "-nis 명사는 성이 일정하지 않으므로 das Ereignis로 익힙니다." },
-    { word: "Arbeitsplatz", article: "der", meaning: "직장, 작업 공간", reason: "복합명사는 마지막 기본어 Platz의 남성 성을 따릅니다." },
-    { word: "Beziehung", article: "die", meaning: "관계", reason: "-ung로 끝나는 명사는 대체로 여성명사입니다." },
-    { word: "Eigentum", article: "das", meaning: "소유물, 재산", reason: "-tum으로 끝나는 추상명사 중 다수는 중성명사입니다." },
-    { word: "Unterschied", article: "der", meaning: "차이", reason: "뚜렷한 어미 규칙이 없어 der Unterschied로 함께 익힙니다." },
-    { word: "Fähigkeit", article: "die", meaning: "능력", reason: "-keit로 끝나는 명사는 여성명사입니다." },
-    { word: "Nachricht", article: "die", meaning: "소식, 메시지", reason: "뚜렷한 어미 규칙이 없어 die Nachricht로 함께 익힙니다." },
-    { word: "Verhalten", article: "das", meaning: "행동, 태도", reason: "명사화된 동사 원형은 일반적으로 중성명사입니다." },
-    { word: "Gedanke", article: "der", meaning: "생각", reason: "-e로 끝나지만 남성인 예외이므로 der Gedanke로 익힙니다." },
-  ],
-  B2: [
-    { word: "Wissenschaft", article: "die", meaning: "학문, 과학", reason: "-schaft로 끝나는 명사는 여성명사입니다." },
-    { word: "Kapitalismus", article: "der", meaning: "자본주의", reason: "-ismus로 끝나는 명사는 남성명사입니다." },
-    { word: "Instrument", article: "das", meaning: "도구, 악기", reason: "-ment로 끝나는 명사는 대체로 중성명사입니다." },
-    { word: "Überzeugung", article: "die", meaning: "확신, 신념", reason: "-ung로 끝나는 명사는 대체로 여성명사입니다." },
-    { word: "Schmetterling", article: "der", meaning: "나비", reason: "-ling으로 끝나는 명사는 남성명사입니다." },
-    { word: "Herausforderung", article: "die", meaning: "도전", reason: "-ung로 끝나는 명사는 대체로 여성명사입니다." },
-    { word: "Erkenntnis", article: "die", meaning: "인식, 통찰", reason: "-nis 명사는 성이 일정하지 않으므로 die Erkenntnis로 익힙니다." },
-    { word: "Bewusstsein", article: "das", meaning: "의식", reason: "뚜렷한 어미 규칙이 없어 das Bewusstsein으로 함께 익힙니다." },
-    { word: "Voraussetzung", article: "die", meaning: "전제 조건", reason: "-ung로 끝나는 명사는 대체로 여성명사입니다." },
-    { word: "Gesellschaft", article: "die", meaning: "사회", reason: "-schaft로 끝나는 명사는 여성명사입니다." },
-    { word: "Wachstum", article: "das", meaning: "성장", reason: "-tum으로 끝나는 추상명사 중 다수는 중성명사입니다." },
-    { word: "Einfluss", article: "der", meaning: "영향", reason: "뚜렷한 어미 규칙이 없어 der Einfluss로 함께 익힙니다." },
-    { word: "Gelegenheit", article: "die", meaning: "기회", reason: "-heit로 끝나는 명사는 여성명사입니다." },
-    { word: "Fortschritt", article: "der", meaning: "진보", reason: "복합 구조의 마지막 기본어 Schritt가 남성명사입니다." },
-    { word: "Phänomen", article: "das", meaning: "현상", reason: "이 차용어는 중성명사이므로 das Phänomen으로 익힙니다." },
-    { word: "Komplexität", article: "die", meaning: "복잡성", reason: "-tät로 끝나는 명사는 여성명사입니다." },
-  ],
-};
 
 function isParseResult(value: unknown): value is ParseResult {
   if (!value || typeof value !== "object") return false;
@@ -143,11 +81,11 @@ function favoriteMorphemes(item: FavoriteWord) {
   }));
 }
 
-function favoriteTypes(item: FavoriteWord): FavoriteType[] {
-  return item.favoriteTypes?.length ? item.favoriteTypes : ["meaning"];
-}
-
-function favoriteFromResult(result: ParseResult, types: FavoriteType[]): FavoriteWord {
+function favoriteFromResult(
+  result: ParseResult,
+  types: FavoriteType[],
+  existing?: FavoriteWord,
+): FavoriteWord {
   return {
     word: result.word,
     article: result.article,
@@ -157,6 +95,8 @@ function favoriteFromResult(result: ParseResult, types: FavoriteType[]): Favorit
     morphemes: result.morphemes,
     articleReason: result.articleReason,
     favoriteTypes: types,
+    level: result.level ?? existing?.level ?? null,
+    addedAt: existing?.addedAt ?? Date.now(),
   };
 }
 
@@ -168,6 +108,77 @@ function articleReasonText(reason: string | null | undefined, article: Article) 
     .trim();
   if (!cleaned || !article || /뚜렷한|확실한 .*규칙이 없|관사 (?:der|die|das)와 단어를 함께/.test(cleaned)) return null;
   return cleaned;
+}
+
+function isVocabularyEntry(value: unknown): value is VocabularyIndexEntry {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Partial<VocabularyIndexEntry>;
+  return typeof entry.word === "string"
+    && typeof entry.meaning === "string"
+    && (entry.level === null || entry.level === "A1" || entry.level === "A2" || entry.level === "B1" || entry.level === "B2");
+}
+
+function isFavoriteWord(value: unknown): value is FavoriteWord {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Partial<FavoriteWord>;
+  return typeof item.word === "string" && typeof item.meaning === "string";
+}
+
+function LevelBadge({ level }: { level?: CefrLevel | null }) {
+  return level
+    ? <span className={`inline-flex rounded-full border px-2.5 py-1 text-[10px] font-black tracking-[0.12em] ${levelStyle[level]}`}>{level}</span>
+    : <span className="inline-flex rounded-full border border-ink/15 bg-paper px-2.5 py-1 text-[10px] font-bold text-ink/40">미분류</span>;
+}
+
+function FavoriteGlyph({ type }: { type: FavoriteType }) {
+  return type === "meaning" ? (
+    <svg aria-hidden viewBox="0 0 24 24" className="h-5 w-5 fill-current">
+      <path d="m12 2.4 2.83 5.73 6.32.92-4.57 4.45 1.08 6.29L12 16.82l-5.66 2.97 1.08-6.29-4.57-4.45 6.32-.92L12 2.4Z" />
+    </svg>
+  ) : (
+    <svg aria-hidden viewBox="0 0 24 24" className="h-5 w-5 fill-none stroke-current stroke-[2.2]">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 5.5A2.5 2.5 0 0 1 7 3h5v16H7a2.5 2.5 0 0 0-2.5 2V5.5Zm15 0A2.5 2.5 0 0 0 17 3h-5v16h5a2.5 2.5 0 0 1 2.5 2V5.5Z" />
+    </svg>
+  );
+}
+
+function FavoriteToggle({
+  type,
+  active,
+  disabled,
+  compact = false,
+  onClick,
+}: {
+  type: FavoriteType;
+  active: boolean;
+  disabled?: boolean;
+  compact?: boolean;
+  onClick: () => void;
+}) {
+  const meaning = type === "meaning";
+  const label = meaning ? "뜻 모름" : "관사 모름";
+  const palette = meaning
+    ? active
+      ? "border-blue-700 bg-blue-700 text-white shadow-sm"
+      : "border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100"
+    : active
+      ? "border-orange-600 bg-orange-600 text-white shadow-sm"
+      : "border-orange-300 bg-orange-50 text-orange-700 hover:bg-orange-100";
+
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      aria-pressed={active}
+      aria-label={`${label} ${active ? "해제" : "등록"}`}
+      title={`${label} ${active ? "해제" : "등록"}`}
+      className={`inline-flex items-center justify-center gap-2 rounded-full border font-bold transition disabled:cursor-not-allowed disabled:opacity-35 ${compact ? "h-10 w-10 p-0" : "px-4 py-2 text-sm"} ${palette}`}
+    >
+      <FavoriteGlyph type={type} />
+      {!compact && <span>{label}</span>}
+    </button>
+  );
 }
 
 function shuffled<T>(items: T[]) {
@@ -349,6 +360,7 @@ function MorphemeComparisonGrid({
                   <div className="mt-4 flex items-center gap-2">
                     {child.article && <span className={`rounded-lg border px-2 py-1 font-serif text-sm font-bold ${articleStyle[child.article]}`}>{child.article}</span>}
                     {child.partOfSpeech && <span className="text-xs uppercase tracking-wider text-ink/45">{child.partOfSpeech}</span>}
+                    <LevelBadge level={child.level} />
                   </div>
                   <ul className="mt-4 space-y-2 text-sm leading-6 text-ink/70">
                     {child.meanings.slice(0, 2).map((meaning, meaningIndex) => <li key={`${meaning}-${meaningIndex}`}>· {meaning}</li>)}
@@ -381,9 +393,14 @@ export function WordWorkbench() {
   const [query, setQuery] = useState("Lehrer");
   const [results, setResults] = useState<ParseResult[]>([]);
   const [favorites, setFavorites] = useState<FavoriteWord[]>([]);
+  const [vocabulary, setVocabulary] = useState<VocabularyIndexEntry[]>([]);
+  const [autocompleteOpen, setAutocompleteOpen] = useState(false);
+  const [autocompleteIndex, setAutocompleteIndex] = useState(-1);
+  const [favoriteFilter, setFavoriteFilter] = useState<FavoriteFilter>("all");
+  const [favoriteSort, setFavoriteSort] = useState<FavoriteSort>("recent");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [level, setLevel] = useState("A2");
+  const [level, setLevel] = useState<CefrLevel>("A2");
   const [exercises, setExercises] = useState<GeneratedExercise[]>([]);
   const [quizLoading, setQuizLoading] = useState(false);
   const [showAnswers, setShowAnswers] = useState(false);
@@ -399,20 +416,90 @@ export function WordWorkbench() {
   const [articleHintVisible, setArticleHintVisible] = useState(false);
   const [wrongArticleQuestions, setWrongArticleQuestions] = useState<ArticleQuizQuestion[]>([]);
   const [articleQuizRound, setArticleQuizRound] = useState<"main" | "retry">("main");
+  const [articleQuizMode, setArticleQuizMode] = useState<ArticleQuizMode>("database");
   const [expandedMorphemes, setExpandedMorphemes] = useState<Record<string, string[]>>({});
   const [favoriteRequestKey, setFavoriteRequestKey] = useState<string | null>(null);
+  const searchFormRef = useRef<HTMLFormElement>(null);
+
+  const autocompleteMatches = useMemo(
+    () => matchVocabulary(vocabulary, query),
+    [query, vocabulary],
+  );
+  const visibleFavorites = useMemo(
+    () => filterAndSortFavorites(favorites, favoriteFilter, favoriteSort),
+    [favoriteFilter, favoriteSort, favorites],
+  );
+  const favoriteNounCount = useMemo(
+    () => favorites.filter((item) => Boolean(item.article)).length,
+    [favorites],
+  );
+  const databaseNounCount = useMemo(
+    () => vocabulary.filter((item) => item.level === level && Boolean(item.article)).length,
+    [level, vocabulary],
+  );
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       try {
         const saved = localStorage.getItem(STORAGE_KEY);
-        if (saved) setFavorites(JSON.parse(saved));
+        const parsed = saved ? JSON.parse(saved) as unknown : [];
+        if (Array.isArray(parsed)) {
+          const stored = parsed.filter(isFavoriteWord);
+          const now = Date.now();
+          setFavorites(stored.map((item, index) => ({
+            ...item,
+            favoriteTypes: getFavoriteTypes(item),
+            addedAt: item.addedAt ?? now - ((stored.length - index) * 1_000),
+          })));
+        }
       } catch {
         localStorage.removeItem(STORAGE_KEY);
       }
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/words", { headers: { Accept: "application/json" } })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("단어 목록을 불러오지 못했습니다.");
+        const data = await response.json() as unknown;
+        if (!Array.isArray(data) || !data.every(isVocabularyEntry)) {
+          throw new Error("단어 목록 형식이 올바르지 않습니다.");
+        }
+        if (!cancelled) setVocabulary(data);
+      })
+      .catch((caught: unknown) => {
+        if (!cancelled) setError(caught instanceof Error ? caught.message : "단어 목록을 불러오지 못했습니다.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!vocabulary.length) return;
+    const levels = new Map(vocabulary.map((entry) => [normalizedWord(entry.word), entry.level]));
+    setFavorites((current) => {
+      let changed = false;
+      const next = current.map((item) => {
+        if (item.level) return item;
+        const levelForWord = levels.get(normalizedWord(item.word));
+        if (!levelForWord) return item;
+        changed = true;
+        return { ...item, level: levelForWord };
+      });
+      if (changed) {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+        } catch {
+          // The in-memory wordbook remains available if storage is unavailable.
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [vocabulary]);
 
   useEffect(() => {
     if (!favoritePopover) return;
@@ -503,9 +590,9 @@ export function WordWorkbench() {
     const key = normalizedWord(result.word);
     updateFavorites((current) => {
       const existing = current.find((item) => normalizedWord(item.word) === key);
-      const types = existing ? favoriteTypes(existing) : [];
+      const types = existing ? getFavoriteTypes(existing) : [];
       const nextTypes = types.includes(type) ? types : [...types, type];
-      const nextFavorite = favoriteFromResult(result, nextTypes);
+      const nextFavorite = favoriteFromResult(result, nextTypes, existing);
       return existing
         ? current.map((item) => normalizedWord(item.word) === key ? nextFavorite : item)
         : [...current, nextFavorite];
@@ -516,7 +603,7 @@ export function WordWorkbench() {
     const key = normalizedWord(word);
     updateFavorites((current) => current.flatMap((item): FavoriteWord[] => {
       if (normalizedWord(item.word) !== key) return [item];
-      const nextTypes = favoriteTypes(item).filter((favoriteType) => favoriteType !== type);
+      const nextTypes = getFavoriteTypes(item).filter((favoriteType) => favoriteType !== type);
       return nextTypes.length ? [{ ...item, favoriteTypes: nextTypes }] : [];
     }));
     setFavoritePopover((current) => current?.owner === word ? null : current);
@@ -543,7 +630,7 @@ export function WordWorkbench() {
     const key = normalizedWord(result.word);
     updateFavorites((current) => current.some((item) => normalizedWord(item.word) === key)
       ? current.map((item) => normalizedWord(item.word) === key
-          ? favoriteFromResult(result, favoriteTypes(item))
+          ? favoriteFromResult(result, getFavoriteTypes(item), item)
           : item)
       : current);
   }
@@ -561,6 +648,8 @@ export function WordWorkbench() {
   async function search(word = query, parents: ParseResult[] = []) {
     const cleanWord = word.replace(/^(?:der|die|das)\s+/i, "").trim();
     if (!cleanWord) return;
+    setAutocompleteOpen(false);
+    setAutocompleteIndex(-1);
     setQuery(cleanWord);
     setLoading(true);
     setError("");
@@ -578,7 +667,49 @@ export function WordWorkbench() {
 
   function submit(event: FormEvent) {
     event.preventDefault();
+    if (autocompleteOpen && autocompleteIndex >= 0) {
+      const selected = autocompleteMatches[autocompleteIndex];
+      if (selected) {
+        void search(selected.word);
+        return;
+      }
+    }
     void search();
+  }
+
+  function searchRandomWord() {
+    if (!vocabulary.length) return;
+    const random = vocabulary[Math.floor(Math.random() * vocabulary.length)];
+    if (random) void search(random.word);
+  }
+
+  function handleSearchKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (!autocompleteOpen || !autocompleteMatches.length) {
+      if (event.key === "ArrowDown" && autocompleteMatches.length) {
+        setAutocompleteOpen(true);
+        setAutocompleteIndex(0);
+        event.preventDefault();
+      }
+      return;
+    }
+
+    if (event.key === "ArrowDown") {
+      setAutocompleteIndex((index) => (index + 1) % autocompleteMatches.length);
+      event.preventDefault();
+    } else if (event.key === "ArrowUp") {
+      setAutocompleteIndex((index) => (index <= 0 ? autocompleteMatches.length - 1 : index - 1));
+      event.preventDefault();
+    } else if (event.key === "Escape") {
+      setAutocompleteOpen(false);
+      setAutocompleteIndex(-1);
+    }
+  }
+
+  function handleSearchBlur(event: FocusEvent<HTMLFormElement>) {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setAutocompleteOpen(false);
+      setAutocompleteIndex(-1);
+    }
   }
 
   function toggleFavoriteType(result: ParseResult, type: FavoriteType) {
@@ -633,11 +764,24 @@ export function WordWorkbench() {
             article: item.article,
             meaning: item.meaning,
             reason: articleReasonText(item.articleReason, item.article) ?? "-",
+            level: item.level ?? null,
+          }]
+        : []
+    ));
+    const databaseQuestions = vocabulary.flatMap((item): ArticleQuizQuestion[] => (
+      item.article && item.level === level
+        ? [{
+            word: item.word,
+            article: item.article,
+            meaning: item.meaning,
+            reason: articleReasonText(item.articleReason, item.article) ?? "-",
+            level: item.level,
           }]
         : []
     ));
     const unique = new Map<string, ArticleQuizQuestion>();
-    [...savedQuestions, ...(ARTICLE_QUIZ_POOL[level] ?? ARTICLE_QUIZ_POOL.A2)].forEach((question) => {
+    const source = articleQuizMode === "favorites" ? savedQuestions : databaseQuestions;
+    source.forEach((question) => {
       const key = normalizedWord(question.word);
       if (!unique.has(key)) unique.set(key, {
         ...question,
@@ -645,7 +789,14 @@ export function WordWorkbench() {
       });
     });
     const next = shuffled(Array.from(unique.values())).slice(0, 8);
+    if (!next.length) {
+      setError(articleQuizMode === "favorites"
+        ? "관사가 있는 단어를 단어장에 먼저 저장해 주세요."
+        : `${level} 명사 데이터를 불러오지 못했습니다.`);
+      return;
+    }
 
+    setError("");
     setArticleQuestions(next);
     setArticleQuestionIndex(0);
     setArticleAnswer(null);
@@ -724,14 +875,15 @@ export function WordWorkbench() {
 
   function hasFavoriteType(word: string, type: FavoriteType) {
     const favorite = favorites.find((item) => normalizedWord(item.word) === normalizedWord(word));
-    return favorite ? favoriteTypes(favorite).includes(type) : false;
+    return favorite ? getFavoriteTypes(favorite).includes(type) : false;
   }
 
   const articleQuestion = articleQuestions[articleQuestionIndex];
+  const autocompleteVisible = autocompleteOpen && Boolean(query.trim()) && autocompleteMatches.length > 0;
 
   return (
     <main className="min-h-screen px-5 py-6 sm:px-8 lg:px-12">
-      <nav className="mx-auto flex max-w-6xl items-center justify-between border-b border-ink/15 pb-5">
+      <nav className="mx-auto flex max-w-6xl items-center border-b border-ink/15 pb-5">
         <div className="flex items-center gap-3">
           <span className="grid h-10 w-10 place-items-center rounded-full bg-ink text-lg text-paper">ZL</span>
           <div>
@@ -739,36 +891,84 @@ export function WordWorkbench() {
             <p className="mt-1 text-[10px] uppercase tracking-[0.24em] text-ink/50">Deutsch, Stück für Stück</p>
           </div>
         </div>
-        <button type="button" onClick={() => setActiveTab("favorites")} className="rounded-full border border-ink/15 bg-white/50 px-4 py-2 text-xs font-bold transition hover:bg-white">★ {favorites.length} Wörter</button>
       </nav>
 
       <div role="tablist" aria-label="학습 화면" className="mx-auto mt-6 flex max-w-6xl gap-2 rounded-[1.4rem] border border-ink/15 bg-white/70 p-2 shadow-sm">
         <button type="button" role="tab" aria-selected={activeTab === "explore"} onClick={() => setActiveTab("explore")} className={`flex-1 rounded-2xl border px-5 py-3.5 text-base font-bold transition ${activeTab === "explore" ? "border-ink bg-ink text-white shadow-md" : "border-transparent text-ink/65 hover:border-ink/10 hover:bg-white"}`}>탐색</button>
-        <button type="button" role="tab" aria-selected={activeTab === "favorites"} onClick={() => setActiveTab("favorites")} className={`flex-1 rounded-2xl border px-5 py-3.5 text-base font-bold transition ${activeTab === "favorites" ? "border-ink bg-ink text-white shadow-md" : "border-transparent text-ink/65 hover:border-ink/10 hover:bg-white"}`}>단어장 · {favorites.length}</button>
+        <button type="button" role="tab" aria-selected={activeTab === "favorites"} onClick={() => setActiveTab("favorites")} className={`flex-1 rounded-2xl border px-5 py-3.5 text-base font-bold transition ${activeTab === "favorites" ? "border-ink bg-ink text-white shadow-md" : "border-transparent text-ink/65 hover:border-ink/10 hover:bg-white"}`}>단어장</button>
       </div>
 
       {error && <div role="alert" className="mx-auto mt-6 max-w-6xl rounded-2xl border border-coral/30 bg-red-50 p-4 text-sm text-red-800">{error}</div>}
 
       {activeTab === "explore" && (
         <>
-          <section className="mx-auto grid max-w-6xl gap-12 pb-14 pt-14 lg:grid-cols-[1.15fr_.85fr] lg:items-center">
-            <div>
-              <p className="mb-5 text-xs font-bold uppercase tracking-[0.25em] text-moss">Wortwerkstatt · 단어 작업실</p>
-              <h1 className="max-w-3xl font-serif text-5xl font-semibold leading-[1.02] tracking-tight sm:text-7xl">긴 단어도,<br /><span className="text-coral">조각내면</span> 보입니다.</h1>
-              <p className="mt-6 max-w-xl text-base leading-7 text-ink/65">독일어 단어를 형태소 단위로 살펴보세요. 여러 조각을 선택해 상세 정보를 나란히 비교하고, 원하는 요소만 다음 탐색 단계로 이어갈 수 있습니다.</p>
-            </div>
-            <form suppressHydrationWarning onSubmit={submit} className="rounded-[2rem] border border-ink/10 bg-white/75 p-3 shadow-card backdrop-blur sm:p-4">
-              <label htmlFor="word" className="mb-2 block px-3 pt-2 text-xs font-bold uppercase tracking-widest text-ink/45">Welches Wort?</label>
-              <div className="flex gap-2">
-                <input suppressHydrationWarning id="word" name="word" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="z. B. Freundlichkeit" autoComplete="off" className="min-w-0 flex-1 rounded-2xl bg-paper px-4 py-4 text-lg outline-none ring-moss/30 transition focus:ring-4" />
-                <button type="submit" disabled={loading} className="rounded-2xl bg-ink px-5 font-bold text-white transition hover:bg-moss disabled:opacity-50">{loading ? "…" : "zerlegen →"}</button>
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2 px-2 pb-1 text-xs text-ink/50">
-                <span>Probieren:</span>
-                {["Lehrer", "Freundlich", "Freundlichkeit", "-er"].map((word) => <button type="button" key={word} onClick={() => void search(word)} className="underline decoration-ink/20 underline-offset-4 hover:text-ink">{word}</button>)}
+          <div className="sticky top-0 z-40 -mx-5 mt-5 border-y border-ink/10 bg-paper/90 px-5 py-3 shadow-sm backdrop-blur-xl sm:-mx-8 sm:px-8 lg:-mx-12 lg:px-12">
+            <form ref={searchFormRef} suppressHydrationWarning onSubmit={submit} onBlur={handleSearchBlur} className="relative mx-auto max-w-6xl">
+              <label htmlFor="word" className="sr-only">독일어 단어 검색</label>
+              <div className="flex flex-wrap gap-2 sm:flex-nowrap">
+                <div className="relative min-w-0 basis-full sm:flex-1">
+                  <input
+                    suppressHydrationWarning
+                    id="word"
+                    name="word"
+                    type="search"
+                    role="combobox"
+                    aria-autocomplete="list"
+                    aria-controls="word-suggestions"
+                    aria-expanded={autocompleteVisible}
+                    aria-activedescendant={autocompleteIndex >= 0 ? `word-option-${autocompleteIndex}` : undefined}
+                    value={query}
+                    onFocus={() => query.trim() && setAutocompleteOpen(true)}
+                    onChange={(event) => {
+                      setQuery(event.target.value);
+                      setAutocompleteOpen(true);
+                      setAutocompleteIndex(-1);
+                    }}
+                    onKeyDown={handleSearchKeyDown}
+                    placeholder="독일어 단어 검색"
+                    autoComplete="off"
+                    className="w-full rounded-2xl border border-ink/10 bg-white px-5 py-3.5 text-base outline-none ring-moss/30 transition focus:border-moss focus:ring-4"
+                  />
+                  {autocompleteVisible && (
+                    <div id="word-suggestions" role="listbox" aria-label="단어 자동완성" className="absolute inset-x-0 top-full z-50 mt-2 max-h-96 overflow-y-auto rounded-2xl border border-ink/15 bg-white p-2 shadow-2xl">
+                      {autocompleteMatches.map((entry, index) => (
+                        <button
+                          type="button"
+                          role="option"
+                          id={`word-option-${index}`}
+                          aria-selected={autocompleteIndex === index}
+                          key={`${entry.word}-${entry.partOfSpeech ?? "word"}`}
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={() => void search(entry.word)}
+                          className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition ${autocompleteIndex === index ? "bg-moss text-white" : "hover:bg-paper"}`}
+                        >
+                          <span className="min-w-0 flex-1">
+                            <span className="flex items-center gap-2">
+                              {entry.article && <span className="font-serif text-sm font-bold">{entry.article}</span>}
+                              <span className="truncate font-serif text-lg font-bold">{entry.word}</span>
+                            </span>
+                            <span className={`block truncate text-xs ${autocompleteIndex === index ? "text-white/70" : "text-ink/45"}`}>{entry.meaning}</span>
+                          </span>
+                          <LevelBadge level={entry.level} />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <button type="button" disabled={!vocabulary.length || loading} onClick={searchRandomWord} className="flex-1 whitespace-nowrap rounded-2xl border border-orange-300 bg-orange-50 px-4 py-3 font-bold text-orange-800 transition hover:bg-orange-100 disabled:opacity-40 sm:flex-none">랜덤 단어</button>
+                <button type="submit" disabled={loading} className="flex-1 whitespace-nowrap rounded-2xl bg-ink px-5 py-3 font-bold text-white transition hover:bg-moss disabled:opacity-50 sm:flex-none">{loading ? "검색 중…" : "검색"}</button>
               </div>
             </form>
-          </section>
+          </div>
+
+          {!results.length && !loading && (
+            <section className="mx-auto grid min-h-[48vh] max-w-6xl place-items-center py-16 text-center">
+              <div>
+                <p className="font-serif text-3xl font-bold">단어를 검색해 분해해 보세요.</p>
+                <p className="mt-3 text-sm text-ink/50">2,500개 핵심 단어 자동완성과 랜덤 검색을 사용할 수 있습니다.</p>
+              </div>
+            </section>
+          )}
 
           {!!results.length && (
             <div className="mx-auto max-w-6xl pb-20">
@@ -782,7 +982,7 @@ export function WordWorkbench() {
                 ))}
               </nav>
 
-              <div className="space-y-6">
+              <div className="space-y-6 pt-8">
                 {results.map((result, resultIndex) => {
                   const meaningFavorite = hasFavoriteType(result.word, "meaning");
                   const articleFavorite = hasFavoriteType(result.word, "article");
@@ -793,21 +993,20 @@ export function WordWorkbench() {
                   const selectedParts = result.morphemes.filter((part) => selectedLookups.includes(part.lookup));
                   return (
                     <section key={`${result.word}-${resultIndex}`} className={`rounded-[2rem] border bg-white/90 p-6 shadow-card transition sm:p-9 ${current ? "border-moss/30" : "border-ink/10"}`}>
-                      <div className="mb-5 flex items-center justify-between gap-4 border-b border-ink/10 pb-4">
-                        <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-ink/40">탐색 단계 {resultIndex + 1}</p>
-                        {!current && <span className="text-xs text-ink/35">이전 결과</span>}
-                      </div>
                       <div className="flex flex-wrap items-start justify-between gap-5">
                         <div>
                           <div className="flex items-center gap-3 sm:gap-4">
                             {result.article && <span className={`rounded-2xl border px-4 py-1.5 font-serif text-xl font-bold leading-none shadow-sm sm:text-2xl ${articleStyle[result.article]}`}>{result.article}</span>}
                             <h2 className="font-serif text-4xl font-bold sm:text-5xl">{result.word}</h2>
                           </div>
-                          {result.partOfSpeech && <p className="mt-3 text-xs uppercase tracking-widest text-ink/45">{result.partOfSpeech}</p>}
+                          <div className="mt-3 flex flex-wrap items-center gap-2">
+                            {result.partOfSpeech && <p className="text-xs uppercase tracking-widest text-ink/45">{result.partOfSpeech}</p>}
+                            <LevelBadge level={result.level} />
+                          </div>
                         </div>
                         <div className="flex flex-wrap justify-end gap-2">
-                          <button type="button" onClick={() => toggleFavoriteType(result, "meaning")} aria-pressed={meaningFavorite} className={`rounded-full border px-4 py-2 text-sm font-bold transition ${meaningFavorite ? "border-amber-300 bg-amber-100 text-amber-800" : "border-ink/15 hover:bg-paper"}`}>{meaningFavorite ? "★ 뜻 학습" : "☆ 뜻을 모름"}</button>
-                          {result.article && <button type="button" onClick={() => toggleFavoriteType(result, "article")} aria-pressed={articleFavorite} className={`rounded-full border px-4 py-2 text-sm font-bold transition ${articleFavorite ? "border-blue-300 bg-blue-100 text-blue-800" : "border-ink/15 hover:bg-paper"}`}>{articleFavorite ? "★ 관사 학습" : "☆ 관사를 모름"}</button>}
+                          <FavoriteToggle type="meaning" active={meaningFavorite} onClick={() => toggleFavoriteType(result, "meaning")} />
+                          {result.article && <FavoriteToggle type="article" active={articleFavorite} onClick={() => toggleFavoriteType(result, "article")} />}
                         </div>
                       </div>
 
@@ -845,7 +1044,6 @@ export function WordWorkbench() {
                             <li key={`${example.sentence}-${index}`} className="text-sm leading-6 text-ink/75">
                               <p className="font-medium">„{example.sentence}“</p>
                               {example.translation && <p className="mt-1 text-ink/50">{example.translation}</p>}
-                              {example.source === "generated" && <span className="mt-1 inline-block text-[10px] font-bold uppercase tracking-wider text-ink/35">자동 보완 예문</span>}
                             </li>
                           ))}
                         </ul>
@@ -868,36 +1066,54 @@ export function WordWorkbench() {
       )}
 
       {activeTab === "favorites" && (
-        <section className="mx-auto max-w-6xl space-y-6 pb-20 pt-10">
-          <div className="overflow-hidden rounded-[2rem] border border-ink/10 bg-white/85 shadow-card">
-            <div className="border-b border-ink/10 p-7 sm:p-8">
+        <section className="-mx-5 space-y-8 pb-20 pt-10 sm:-mx-8 lg:-mx-12">
+          <header className="flex flex-col gap-4 px-5 sm:px-8 lg:flex-row lg:items-end lg:justify-between lg:px-12">
+            <div>
               <p className="text-xs font-bold uppercase tracking-[0.22em] text-moss">Meine Wörter · 단어장</p>
-              <h2 className="mt-3 font-serif text-3xl">저장한 단어를 한눈에.</h2>
-              <p className="mt-2 text-sm leading-6 text-ink/55">단어를 누르면 전체 탐색으로, 분해 요소를 누르면 빠른 설명으로 이동합니다.</p>
+              <h2 className="mt-2 font-serif text-3xl">저장한 단어</h2>
             </div>
-            {favorites.length ? (
-              <div className="p-3 sm:p-5">
-                <div className="overflow-x-auto rounded-2xl border border-ink/10">
-                <table className="w-full min-w-[960px] border-collapse text-left text-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <div role="group" aria-label="별표 유형 필터" className="flex rounded-xl border border-ink/15 bg-white p-1">
+                {([
+                  ["all", "전체"],
+                  ["meaning", "뜻 모름"],
+                  ["article", "관사 모름"],
+                ] as const).map(([value, label]) => (
+                  <button type="button" key={value} aria-pressed={favoriteFilter === value} onClick={() => setFavoriteFilter(value)} className={`rounded-lg px-3 py-2 text-xs font-bold transition ${favoriteFilter === value ? "bg-ink text-white" : "text-ink/55 hover:bg-paper"}`}>{label}</button>
+                ))}
+              </div>
+              <label htmlFor="favorite-sort" className="sr-only">단어장 정렬</label>
+              <select suppressHydrationWarning id="favorite-sort" value={favoriteSort} onChange={(event) => setFavoriteSort(event.target.value as FavoriteSort)} className="rounded-xl border border-ink/15 bg-white px-3 py-2.5 text-xs font-bold outline-none focus:border-moss">
+                <option value="recent">최신 추가순</option>
+                <option value="alphabetical">알파벳순</option>
+              </select>
+            </div>
+          </header>
+
+          {favorites.length ? (
+            visibleFavorites.length ? (
+              <div className="overflow-x-auto border-y border-ink/10 bg-white/85">
+                <table className="w-full min-w-[1060px] border-collapse text-left text-sm">
                   <thead className="bg-paper text-[10px] uppercase tracking-[0.18em] text-ink/45">
-                    <tr><th className="px-5 py-3">관사</th><th className="px-4 py-3">단어</th><th className="px-4 py-3">별표 유형</th><th className="px-4 py-3">뜻</th><th className="px-4 py-3">분해 요소</th><th className="px-5 py-3">관사 이유</th></tr>
+                    <tr><th className="px-5 py-3 lg:px-12">관사</th><th className="px-4 py-3">단어</th><th className="px-4 py-3">수준</th><th className="px-4 py-3">학습</th><th className="px-4 py-3">뜻</th><th className="px-4 py-3">분해 요소</th><th className="px-5 py-3 lg:pr-12">관사 이유</th></tr>
                   </thead>
                   <tbody>
-                    {favorites.map((item) => {
+                    {visibleFavorites.map((item) => {
                       const parts = favoriteMorphemes(item);
-                      const types = favoriteTypes(item);
+                      const types = getFavoriteTypes(item);
                       return (
-                        <tr key={item.word} className="border-t border-ink/10 align-top">
-                          <td className="px-5 py-5">
+                        <tr key={item.word} className="border-t border-ink/10 align-top transition hover:bg-paper/45">
+                          <td className="px-5 py-5 lg:pl-12">
                             {item.article ? <span className={`inline-flex min-w-12 justify-center rounded-xl border px-3 py-1.5 font-serif text-base font-bold ${articleStyle[item.article]}`}>{item.article}</span> : <span className="pl-3 text-ink/30">—</span>}
                           </td>
                           <td className="px-4 py-5">
                             <button type="button" onClick={() => openFavorite(item.word)} className="whitespace-nowrap font-serif text-lg font-bold underline decoration-moss/25 underline-offset-4 transition hover:text-moss">{item.word} →</button>
                           </td>
+                          <td className="px-4 py-5"><LevelBadge level={item.level} /></td>
                           <td className="px-4 py-5">
-                            <div className="flex flex-wrap gap-1.5">
-                              <button type="button" disabled={favoriteRequestKey === `${normalizedWord(item.word)}:meaning`} onClick={() => void toggleFavoriteByWord(item.word, "meaning")} aria-pressed={types.includes("meaning")} className={`rounded-full border px-2.5 py-1 text-[11px] font-bold transition disabled:opacity-50 ${types.includes("meaning") ? "border-amber-300 bg-amber-100 text-amber-800" : "border-ink/15 bg-white text-ink/45 hover:bg-amber-50"}`}>{types.includes("meaning") ? "★ 뜻" : "☆ 뜻"}</button>
-                              <button type="button" disabled={!item.article || favoriteRequestKey === `${normalizedWord(item.word)}:article`} onClick={() => void toggleFavoriteByWord(item.word, "article")} aria-pressed={types.includes("article")} className={`rounded-full border px-2.5 py-1 text-[11px] font-bold transition disabled:opacity-35 ${types.includes("article") ? "border-blue-300 bg-blue-100 text-blue-800" : "border-ink/15 bg-white text-ink/45 hover:bg-blue-50"}`}>{types.includes("article") ? "★ 관사" : "☆ 관사"}</button>
+                            <div className="flex gap-2">
+                              <FavoriteToggle compact type="meaning" active={types.includes("meaning")} disabled={favoriteRequestKey === `${normalizedWord(item.word)}:meaning`} onClick={() => void toggleFavoriteByWord(item.word, "meaning")} />
+                              <FavoriteToggle compact type="article" active={types.includes("article")} disabled={!item.article || favoriteRequestKey === `${normalizedWord(item.word)}:article`} onClick={() => void toggleFavoriteByWord(item.word, "article")} />
                             </div>
                           </td>
                           <td className="max-w-sm px-4 py-5 leading-6 text-ink/65">{item.meaning}</td>
@@ -911,33 +1127,43 @@ export function WordWorkbench() {
                                   </span>
                                 ))}
                               </div>
-                            ) : <span className="text-ink/35">{item.morphemes?.length || item.decomposition ? "분해 완료" : "상세 검색에서 확인"}</span>}
+                            ) : <span className="text-ink/35">{item.morphemes?.length || item.decomposition ? "분해 완료" : "—"}</span>}
                           </td>
-                          <td className="max-w-xs px-5 py-5 text-xs leading-5 text-ink/55">{articleReasonText(item.articleReason, item.article) ?? "-"}</td>
+                          <td className="max-w-xs px-5 py-5 text-xs leading-5 text-ink/55 lg:pr-12">{articleReasonText(item.articleReason, item.article) ?? "-"}</td>
                         </tr>
                       );
                     })}
                   </tbody>
                 </table>
-                </div>
               </div>
-            ) : <div className="grid min-h-52 place-items-center p-8 text-center text-sm leading-6 text-ink/45">탐색 결과에서 별표를 눌러<br />학습할 단어를 저장해 보세요.</div>}
-          </div>
+            ) : <div className="grid min-h-40 place-items-center border-y border-ink/10 bg-white/70 p-8 text-sm text-ink/45">선택한 조건에 맞는 단어가 없습니다.</div>
+          ) : <div className="grid min-h-52 place-items-center border-y border-ink/10 bg-white/70 p-8 text-center text-sm leading-6 text-ink/45">탐색 결과에서 별표를 눌러<br />학습할 단어를 저장해 보세요.</div>}
 
-          <div className="grid gap-6 lg:grid-cols-2">
+          <div className="mx-auto grid max-w-6xl gap-6 px-5 sm:px-8 lg:grid-cols-2 lg:px-0">
             <div className="rounded-[2rem] border border-blue-200 bg-blue-50 p-7 text-blue-950 shadow-card sm:p-8">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <p className="text-xs font-bold uppercase tracking-[0.22em] text-blue-700/60">Artikel-Quiz · 관사 맞추기</p>
-                  <h2 className="mt-2 font-serif text-2xl font-bold">der, die oder das?</h2>
+              <p className="text-xs font-bold uppercase tracking-[0.22em] text-blue-700/60">Artikel-Quiz · 관사 맞추기</p>
+              <h2 className="mt-2 font-serif text-2xl font-bold">der, die oder das?</h2>
+              <fieldset className="mt-6 grid gap-2 sm:grid-cols-2">
+                <legend className="sr-only">관사 퀴즈 출제 범위</legend>
+                <label className={`cursor-pointer rounded-2xl border p-4 transition ${articleQuizMode === "favorites" ? "border-blue-800 bg-white shadow-sm" : "border-blue-200 bg-blue-100/50"}`}>
+                  <input type="radio" name="article-quiz-mode" value="favorites" checked={articleQuizMode === "favorites"} onChange={() => setArticleQuizMode("favorites")} className="sr-only" />
+                  <span className="block text-sm font-bold">내 단어장</span>
+                  <span className="mt-1 block text-xs text-blue-900/55">명사 {favoriteNounCount}개</span>
+                </label>
+                <label className={`cursor-pointer rounded-2xl border p-4 transition ${articleQuizMode === "database" ? "border-blue-800 bg-white shadow-sm" : "border-blue-200 bg-blue-100/50"}`}>
+                  <input type="radio" name="article-quiz-mode" value="database" checked={articleQuizMode === "database"} onChange={() => setArticleQuizMode("database")} className="sr-only" />
+                  <span className="block text-sm font-bold">전체 DB 랜덤</span>
+                  <span className="mt-1 block text-xs text-blue-900/55">{level} 명사 {databaseNounCount}개</span>
+                </label>
+              </fieldset>
+              {articleQuizMode === "database" && (
+                <div className="mt-4 flex items-center justify-between rounded-xl bg-white/65 px-4 py-3">
+                  <label htmlFor="article-level" className="text-xs font-bold">난이도</label>
+                  <select suppressHydrationWarning id="article-level" name="article-level" value={level} onChange={(event) => setLevel(event.target.value as CefrLevel)} className="rounded-xl border border-blue-300 bg-white px-3 py-2 text-sm font-bold text-blue-950 outline-none">{(["A1", "A2", "B1", "B2"] as CefrLevel[]).map((item) => <option key={item} value={item}>{item}</option>)}</select>
                 </div>
-                <select suppressHydrationWarning id="article-level" name="article-level" aria-label="관사 퀴즈 난이도" value={level} onChange={(event) => setLevel(event.target.value)} className="rounded-xl border border-blue-300 bg-white px-3 py-2 text-sm font-bold text-blue-950 outline-none">{["A1", "A2", "B1", "B2"].map((item) => <option key={item} value={item}>{item}</option>)}</select>
-              </div>
-              <div className="grid min-h-64 place-items-center text-center">
-                <div>
-                  <p className="max-w-sm text-sm leading-6 text-blue-900/60">각 단계는 전체 화면에서 진행됩니다. 저장한 명사와 수준별 무작위 단어 중 8문제를 출제합니다.</p>
-                  <button type="button" onClick={startArticleQuiz} className="mt-5 rounded-xl bg-blue-950 px-6 py-3.5 text-sm font-bold text-white transition hover:bg-moss">전체 화면 퀴즈 시작 →</button>
-                </div>
+              )}
+              <div className="mt-6 text-center">
+                <button type="button" disabled={articleQuizMode === "favorites" ? !favoriteNounCount : !databaseNounCount} onClick={startArticleQuiz} className="w-full rounded-2xl bg-blue-950 px-6 py-4 text-base font-bold text-white transition hover:bg-moss disabled:cursor-not-allowed disabled:opacity-40">퀴즈 시작 →</button>
               </div>
             </div>
 
@@ -947,7 +1173,7 @@ export function WordWorkbench() {
                 {!!exercises.length && <button type="button" onClick={() => setShowAnswers((value) => !value)} className="text-xs font-bold underline underline-offset-4">{showAnswers ? "정답 숨기기" : "정답 보기"}</button>}
               </div>
               <div className="mt-5 flex gap-2">
-                <select suppressHydrationWarning id="level" name="level" aria-label="퀴즈 난이도" value={level} onChange={(event) => setLevel(event.target.value)} className="rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-white outline-none">{["A1", "A2", "B1", "B2"].map((item) => <option className="text-ink" key={item} value={item}>{item}</option>)}</select>
+                <select suppressHydrationWarning id="level" name="level" aria-label="퀴즈 난이도" value={level} onChange={(event) => setLevel(event.target.value as CefrLevel)} className="rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-white outline-none">{(["A1", "A2", "B1", "B2"] as CefrLevel[]).map((item) => <option className="text-ink" key={item} value={item}>{item}</option>)}</select>
                 <button type="button" disabled={!favorites.length || quizLoading} onClick={() => void generateExercises()} className="flex-1 rounded-xl bg-coral px-4 py-2 text-sm font-bold hover:bg-[#c95e52] disabled:opacity-40">{quizLoading ? "문장 만드는 중…" : "AI 퀴즈 만들기"}</button>
               </div>
               {exercises.length ? <ol className="mt-6 space-y-5">{exercises.map((item, index) => (
@@ -967,7 +1193,7 @@ export function WordWorkbench() {
           <div className="mx-auto flex min-h-full max-w-3xl flex-col px-5 py-6 sm:px-8 sm:py-10">
             <header className="flex items-center justify-between border-b border-ink/15 pb-5">
               <div>
-                <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-blue-700/60">Artikel-Quiz · {articleQuizRound === "retry" ? "오답 재도전" : level}</p>
+                <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-blue-700/60">Artikel-Quiz · {articleQuizRound === "retry" ? "오답 재도전" : articleQuizMode === "favorites" ? "내 단어장" : `${level} DB`}</p>
                 <p className="mt-1 font-serif text-xl font-bold">der, die oder das?</p>
               </div>
               <button type="button" onClick={() => setArticleQuizOpen(false)} aria-label="관사 퀴즈 닫기" className="grid h-11 w-11 place-items-center rounded-full border border-ink/15 bg-white text-2xl text-ink/55 transition hover:text-ink">×</button>
@@ -998,11 +1224,14 @@ export function WordWorkbench() {
                   <div className="flex items-start justify-between gap-4">
                     <div>
                       <p className="text-xs font-bold uppercase tracking-[0.2em] text-ink/35">Welcher Artikel?</p>
-                      <h2 className="mt-3 font-serif text-5xl font-bold sm:text-7xl">{articleQuestion.word}</h2>
+                      <div className="mt-3 flex flex-wrap items-end gap-3">
+                        <h2 className="font-serif text-5xl font-bold sm:text-7xl">{articleQuestion.word}</h2>
+                        <LevelBadge level={articleQuestion.level} />
+                      </div>
                     </div>
-                    <div className="flex flex-col items-end gap-2 sm:flex-row">
-                      <button type="button" disabled={favoriteRequestKey === `${normalizedWord(articleQuestion.word)}:meaning`} onClick={() => void toggleFavoriteByWord(articleQuestion.word, "meaning")} aria-pressed={hasFavoriteType(articleQuestion.word, "meaning")} className={`rounded-full border px-3 py-2 text-xs font-bold transition disabled:opacity-50 ${hasFavoriteType(articleQuestion.word, "meaning") ? "border-amber-300 bg-amber-100 text-amber-800" : "border-ink/15 bg-white hover:bg-amber-50"}`}>{hasFavoriteType(articleQuestion.word, "meaning") ? "★ 뜻 단어" : "☆ 뜻을 모름"}</button>
-                      <button type="button" disabled={favoriteRequestKey === `${normalizedWord(articleQuestion.word)}:article`} onClick={() => void toggleFavoriteByWord(articleQuestion.word, "article")} aria-pressed={hasFavoriteType(articleQuestion.word, "article")} className={`rounded-full border px-3 py-2 text-xs font-bold transition disabled:opacity-50 ${hasFavoriteType(articleQuestion.word, "article") ? "border-blue-300 bg-blue-100 text-blue-800" : "border-ink/15 bg-white hover:bg-blue-50"}`}>{hasFavoriteType(articleQuestion.word, "article") ? "★ 관사 단어" : "☆ 관사를 모름"}</button>
+                    <div className="flex items-center gap-2">
+                      <FavoriteToggle compact type="meaning" active={hasFavoriteType(articleQuestion.word, "meaning")} disabled={favoriteRequestKey === `${normalizedWord(articleQuestion.word)}:meaning`} onClick={() => void toggleFavoriteByWord(articleQuestion.word, "meaning")} />
+                      <FavoriteToggle compact type="article" active={hasFavoriteType(articleQuestion.word, "article")} disabled={favoriteRequestKey === `${normalizedWord(articleQuestion.word)}:article`} onClick={() => void toggleFavoriteByWord(articleQuestion.word, "article")} />
                     </div>
                   </div>
 
@@ -1042,6 +1271,7 @@ export function WordWorkbench() {
             {favoritePopover.error && <p className="mt-4 rounded-xl bg-red-50 p-3 text-xs leading-5 text-red-800">{favoritePopover.error}</p>}
             {favoritePopover.result && (
               <>
+                <div className="mt-2"><LevelBadge level={favoritePopover.result.level} /></div>
                 <p className="mt-3 line-clamp-3 text-xs leading-5 text-ink/65">{favoritePopover.result.meanings[0]}</p>
                 <div className="mt-3 flex flex-wrap items-center gap-1.5">
                   {favoritePopover.result.morphemes.map((part, index) => <span key={`${part.lookup}-${index}`} className="flex items-center gap-2 text-sm font-bold text-moss">{index > 0 && <span className="text-ink/25">+</span>}<span className="rounded-lg bg-moss/5 px-2.5 py-1.5">{part.text}</span></span>)}
