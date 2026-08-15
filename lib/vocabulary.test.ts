@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { FavoriteWord, ParseResult, VocabularyIndexEntry } from "./types";
 import { filterAndSortFavorites, inferDifficultyLevel, isAffixWord, matchVocabulary, vocabularyForRandom } from "./vocabulary";
+import { createWordId, markMastered } from "./spaced-repetition";
 
 const vocabulary: VocabularyIndexEntry[] = [
   { word: "Freundlichkeit", article: "die", partOfSpeech: "Noun", level: "B1", meaning: "kindness", articleReason: null },
@@ -31,7 +32,7 @@ function parsedWord(word: string, partOfSpeech: string, morphemeCount = 1): Pars
 }
 
 function favorite(word: string, favoriteTypes: FavoriteWord["favoriteTypes"], addedAt: number): FavoriteWord {
-  return { word, article: "die", meaning: word, favoriteTypes, addedAt };
+  return { id: createWordId(word, "Noun"), word, article: "die", meaning: word, partOfSpeech: "Noun", favoriteTypes, addedAt };
 }
 
 describe("matchVocabulary", () => {
@@ -72,12 +73,21 @@ describe("filterAndSortFavorites", () => {
   });
 
   it("filters meaning-only stars and treats legacy favorites as meaning stars", () => {
-    const withLegacy = [...favorites, { word: "Alt", article: null, meaning: "old", addedAt: 4 }];
+    const withLegacy = [...favorites, { id: createWordId("Alt", null), word: "Alt", article: null, meaning: "old", addedAt: 4 }];
     expect(filterAndSortFavorites(withLegacy, "meaning", "recent").map((item) => item.word)).toEqual([
       "Alt",
       "Haus",
       "Zeitung",
     ]);
+  });
+
+  it("supports mastery scope combinations and review-date sorting", () => {
+    const mastered = markMastered(favorite("Buch", ["meaning"], 4), 10);
+    const all = [...favorites, mastered];
+    expect(filterAndSortFavorites(all, "all", "recent", "active").map((item) => item.word)).not.toContain("Buch");
+    expect(filterAndSortFavorites(all, "all", "recent", "include")).toHaveLength(4);
+    expect(filterAndSortFavorites(all, "meaning", "review", "mastered")).toEqual([]);
+    expect(filterAndSortFavorites(all, "all", "review", "mastered")).toEqual([mastered]);
   });
 });
 
@@ -106,5 +116,17 @@ describe("vocabulary difficulty and random selection", () => {
       "Freundlichkeit",
       "unfreundlich",
     ]);
+  });
+
+  it("excludes mastered words from random candidates", () => {
+    const mastered = markMastered({
+      id: createWordId("freundlich", "Adjective"),
+      word: "freundlich",
+      article: null,
+      meaning: "friendly",
+      partOfSpeech: "Adjective",
+      favoriteTypes: ["meaning"],
+    }, 0);
+    expect(vocabularyForRandom(vocabulary, "A1-B2", [mastered]).map((entry) => entry.word)).not.toContain("freundlich");
   });
 });

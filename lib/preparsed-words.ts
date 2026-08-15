@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getGermanCaseCandidates } from "./german-word";
+import { getRuntimeVocabularyStore, isStoredParseResult } from "./runtime-vocabulary-store";
 import type { CefrLevel, ParseResult, VocabularyIndexEntry } from "./types";
 import { inferDifficultyLevel, isAffixWord } from "./vocabulary";
 
@@ -11,6 +12,7 @@ interface PreParsedDataset {
 interface LoadedVocabulary {
   index: Map<string, ParseResult>;
   vocabulary: Map<string, VocabularyIndexEntry>;
+  baseKeys: Set<string>;
   runtimeKeys: Set<string>;
 }
 
@@ -19,43 +21,27 @@ let persistenceQueue = Promise.resolve();
 const RUNTIME_DATA_PATH = path.join(process.cwd(), "data", "runtime-vocabulary.json");
 const RUNTIME_TEMP_PATH = `${RUNTIME_DATA_PATH}.tmp`;
 
-function isCefrLevel(value: unknown): value is CefrLevel {
-  return value === "A1" || value === "A2" || value === "B1" || value === "B2";
-}
-
-function isParseResult(value: unknown): value is ParseResult {
-  if (typeof value !== "object" || value === null) return false;
-  const result = value as Partial<ParseResult>;
-  return typeof result.word === "string"
-    && (result.article === null || result.article === "der" || result.article === "die" || result.article === "das")
-    && (result.partOfSpeech === null || typeof result.partOfSpeech === "string")
-    && Array.isArray(result.meanings)
-    && result.meanings.every((meaning) => typeof meaning === "string")
-    && Array.isArray(result.examples)
-    && Array.isArray(result.morphemes)
-    && typeof result.sourceUrl === "string"
-    && (result.level === undefined || result.level === null || isCefrLevel(result.level));
-}
-
 function isDataset(value: unknown): value is PreParsedDataset {
   if (typeof value !== "object" || value === null || !("words" in value)) return false;
   const words = (value as { words?: unknown }).words;
-  return Array.isArray(words) && words.every(isParseResult);
+  return Array.isArray(words) && words.every(isStoredParseResult);
 }
 
 async function loadVocabulary(): Promise<LoadedVocabulary> {
   const index = new Map<string, ParseResult>();
   const vocabulary = new Map<string, VocabularyIndexEntry>();
+  const baseKeys = new Set<string>();
   const runtimeKeys = new Set<string>();
 
-  function addResult(sourceResult: ParseResult, runtime = false) {
+  function addResult(sourceResult: ParseResult, source: "base" | "runtime") {
     const level = isAffixWord(sourceResult.word, sourceResult.partOfSpeech)
       ? null
       : sourceResult.level ?? null;
     const result = sourceResult.level === level ? sourceResult : { ...sourceResult, level };
     const key = result.word.normalize("NFC");
     index.set(key, result);
-    if (runtime) runtimeKeys.add(key);
+    if (source === "base") baseKeys.add(key);
+    else runtimeKeys.add(key);
     vocabulary.set(key, {
       word: result.word,
       article: result.article,
@@ -70,7 +56,7 @@ async function loadVocabulary(): Promise<LoadedVocabulary> {
     const filePath = path.join(process.cwd(), "public", "data", "pre-parsed-words.json");
     const parsed = JSON.parse(await readFile(filePath, "utf8")) as unknown;
     if (!isDataset(parsed)) throw new Error("사전 파싱 캐시 형식이 올바르지 않습니다.");
-    parsed.words.forEach((result) => addResult(result));
+    parsed.words.forEach((result) => addResult(result, "base"));
   } catch (error) {
     const missing = error instanceof Error && "code" in error && error.code === "ENOENT";
     if (!missing) throw error;
@@ -79,21 +65,25 @@ async function loadVocabulary(): Promise<LoadedVocabulary> {
   try {
     const parsed = JSON.parse(await readFile(RUNTIME_DATA_PATH, "utf8")) as unknown;
     if (!isDataset(parsed)) throw new Error("런타임 단어 데이터 형식이 올바르지 않습니다.");
-    parsed.words.forEach((result) => addResult(result, true));
+    parsed.words.forEach((result) => addResult(result, "runtime"));
   } catch (error) {
     const missing = error instanceof Error && "code" in error && error.code === "ENOENT";
     if (!missing) throw error;
   }
-  return { index, vocabulary, runtimeKeys };
+  return { index, vocabulary, baseKeys, runtimeKeys };
 }
 
-function findResult(index: Map<string, ParseResult>, input: string) {
+function findResultWithKey(index: Map<string, ParseResult>, input: string) {
   const normalized = input.trim().normalize("NFC");
   for (const candidate of getGermanCaseCandidates(normalized)) {
     const result = index.get(candidate);
-    if (result) return result;
+    if (result) return { key: candidate, result };
   }
   return null;
+}
+
+function findResult(index: Map<string, ParseResult>, input: string) {
+  return findResultWithKey(index, input)?.result ?? null;
 }
 
 function vocabularyEntry(result: ParseResult): VocabularyIndexEntry {
@@ -112,30 +102,68 @@ async function persistRuntimeWords(words: ParseResult[]) {
     await mkdir(path.dirname(RUNTIME_DATA_PATH), { recursive: true });
     await writeFile(RUNTIME_TEMP_PATH, `${JSON.stringify({ words }, null, 2)}\n`, "utf8");
     await rename(RUNTIME_TEMP_PATH, RUNTIME_DATA_PATH);
+    return true;
   } catch (error) {
     const readOnly = error instanceof Error && "code" in error
       && (error.code === "EROFS" || error.code === "EACCES" || error.code === "EPERM");
     if (!readOnly) throw error;
     // Serverless filesystems can be read-only; the process-local registry still works.
+    return false;
   }
 }
 
-export async function getPreParsedWord(input: string) {
+function addRuntimeResult(loaded: LoadedVocabulary, result: ParseResult) {
+  const key = result.word.normalize("NFC");
+  if (loaded.baseKeys.has(key)) return;
+  loaded.index.set(key, result);
+  loaded.vocabulary.set(key, vocabularyEntry(result));
+  loaded.runtimeKeys.add(key);
+}
+
+export async function getStoredWord(input: string) {
   vocabularyPromise ??= loadVocabulary();
-  const { index } = await vocabularyPromise;
-  return findResult(index, input);
+  const loaded = await vocabularyPromise;
+  const local = findResultWithKey(loaded.index, input);
+  if (local) {
+    return {
+      result: local.result,
+      source: loaded.baseKeys.has(local.key) ? "pre-parsed" as const : "database" as const,
+    };
+  }
+
+  const store = getRuntimeVocabularyStore();
+  if (!store) return null;
+  try {
+    const result = await store.find(input);
+    if (!result) return null;
+    addRuntimeResult(loaded, result);
+    return { result, source: "database" as const };
+  } catch (error) {
+    console.warn("Neon에서 런타임 단어를 조회하지 못했습니다.", error);
+    return null;
+  }
 }
 
 export async function getVocabularyIndex() {
   vocabularyPromise ??= loadVocabulary();
-  return Array.from((await vocabularyPromise).vocabulary.values());
+  const loaded = await vocabularyPromise;
+  const store = getRuntimeVocabularyStore();
+  if (store) {
+    try {
+      const runtimeWords = await store.list();
+      runtimeWords.forEach((result) => addRuntimeResult(loaded, result));
+    } catch (error) {
+      console.warn("Neon 런타임 단어 목록을 불러오지 못했습니다.", error);
+    }
+  }
+  return Array.from(loaded.vocabulary.values());
 }
 
 export async function registerParsedWord(parsed: ParseResult) {
   vocabularyPromise ??= loadVocabulary();
   const loaded = await vocabularyPromise;
   const existing = findResult(loaded.index, parsed.word);
-  if (existing) return existing;
+  if (existing) return { result: existing, stored: true };
 
   const knownComponentLevels = parsed.morphemes.flatMap((part): CefrLevel[] => {
     const component = findResult(loaded.index, part.lookup);
@@ -145,20 +173,30 @@ export async function registerParsedWord(parsed: ParseResult) {
     ...parsed,
     level: inferDifficultyLevel(parsed, knownComponentLevels),
   };
-  const key = result.word.normalize("NFC");
-  loaded.index.set(key, result);
-  loaded.vocabulary.set(key, vocabularyEntry(result));
-  loaded.runtimeKeys.add(key);
+  addRuntimeResult(loaded, result);
 
-  persistenceQueue = persistenceQueue.then(() => {
+  const store = getRuntimeVocabularyStore();
+  if (store) {
+    try {
+      await store.upsert(result);
+      return { result, stored: true };
+    } catch (error) {
+      console.warn("Neon에 런타임 단어를 저장하지 못했습니다.", error);
+      return { result, stored: false };
+    }
+  }
+
+  let stored = true;
+  persistenceQueue = persistenceQueue.then(async () => {
     const runtimeWords = Array.from(loaded.runtimeKeys).flatMap((runtimeKey): ParseResult[] => {
       const word = loaded.index.get(runtimeKey);
       return word ? [word] : [];
     });
-    return persistRuntimeWords(runtimeWords);
+    stored = await persistRuntimeWords(runtimeWords);
   }).catch((error: unknown) => {
+    stored = false;
     console.warn("런타임 단어 데이터를 파일에 저장하지 못했습니다.", error);
   });
   await persistenceQueue;
-  return result;
+  return { result, stored };
 }

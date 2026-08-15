@@ -2,11 +2,26 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FocusEvent, FormEvent, KeyboardEvent } from "react";
-import type { CefrLevel, FavoriteType, FavoriteWord, GeneratedExercise, Morpheme, ParseResult, VocabularyIndexEntry } from "@/lib/types";
+import type { CefrLevel, FavoriteType, FavoriteWord, GeneratedExercise, Morpheme, ParseResult, VocabularyIndexEntry, WordbookState } from "@/lib/types";
 import { articleReasonText, buildArticleQuizQuestions, isCorrectArticleAnswer, shuffleItems } from "@/lib/article-quiz";
 import type { ArticleQuizMode, ArticleQuizQuestion, DefiniteArticle } from "@/lib/article-quiz";
 import { filterAndSortFavorites, getFavoriteTypes, isAffixWord, matchVocabulary, vocabularyForRandom } from "@/lib/vocabulary";
-import type { FavoriteFilter, FavoriteSort, RandomLevelRange } from "@/lib/vocabulary";
+import type { FavoriteFilter, FavoriteSort, MasteryScope, RandomLevelRange } from "@/lib/vocabulary";
+import {
+  activateUnknownType,
+  applyReview,
+  buildClozeWordPool,
+  createWordId,
+  dueMasteredWords,
+  isReviewDue,
+  markMastered,
+  migrateWordbookState,
+  nextUpcomingReviewAt,
+  recordArticleAnswer,
+  removeMastery,
+  reviewSucceeded,
+  shouldSuggestMastery,
+} from "@/lib/spaced-repetition";
 
 const STORAGE_KEY = "zerlegen-lernen:favorites";
 const HISTORY_KEY = "zerlegen-lernen:results";
@@ -14,6 +29,7 @@ const WORD_CACHE_KEY = "zerlegen-lernen:word-cache:v6";
 const WORD_CACHE_TTL_MS = 24 * 60 * 60 * 1_000;
 const WORD_CACHE_MAX_ENTRIES = 100;
 const CLIENT_REQUEST_DELAY_MS = 175;
+const AI_ENABLED = process.env.NEXT_PUBLIC_AI_ENABLED === "true";
 
 const articleStyle = {
   der: "bg-blue-100 text-blue-700 border-blue-200",
@@ -77,6 +93,7 @@ function favoriteFromResult(
   existing?: FavoriteWord,
 ): FavoriteWord {
   return {
+    id: createWordId(result.word, result.partOfSpeech),
     word: result.word,
     article: result.article,
     meaning: result.meanings[0],
@@ -84,9 +101,11 @@ function favoriteFromResult(
     partOfSpeech: result.partOfSpeech,
     morphemes: result.morphemes,
     articleReason: result.articleReason,
-    favoriteTypes: types,
+    favoriteTypes: existing?.mastery ? [] : types,
     level: result.level ?? existing?.level ?? null,
     addedAt: existing?.addedAt ?? Date.now(),
+    mastery: existing?.mastery,
+    practice: existing?.practice,
   };
 }
 
@@ -96,12 +115,6 @@ function isVocabularyEntry(value: unknown): value is VocabularyIndexEntry {
   return typeof entry.word === "string"
     && typeof entry.meaning === "string"
     && (entry.level === null || entry.level === "A1" || entry.level === "A2" || entry.level === "B1" || entry.level === "B2");
-}
-
-function isFavoriteWord(value: unknown): value is FavoriteWord {
-  if (!value || typeof value !== "object") return false;
-  const item = value as Partial<FavoriteWord>;
-  return typeof item.word === "string" && typeof item.meaning === "string";
 }
 
 function vocabularyEntryFromResult(result: ParseResult): VocabularyIndexEntry {
@@ -131,6 +144,43 @@ function FavoriteGlyph({ type }: { type: FavoriteType }) {
       <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 5.5A2.5 2.5 0 0 1 7 3h5v16H7a2.5 2.5 0 0 0-2.5 2V5.5Zm15 0A2.5 2.5 0 0 0 17 3h-5v16h5a2.5 2.5 0 0 1 2.5 2V5.5Z" />
     </svg>
   );
+}
+
+function MasteryGlyph() {
+  return (
+    <svg aria-hidden viewBox="0 0 24 24" className="h-5 w-5 fill-none stroke-current stroke-[2.4]">
+      <circle cx="12" cy="12" r="9" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="m8 12.2 2.5 2.5L16.5 9" />
+    </svg>
+  );
+}
+
+function MasteryToggle({
+  active,
+  compact = false,
+  onClick,
+}: {
+  active: boolean;
+  compact?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      aria-label={`학습 완료 ${active ? "해제" : "표시"}`}
+      title={`학습 완료 ${active ? "해제" : "표시"}`}
+      className={`inline-flex items-center justify-center gap-2 rounded-full border font-bold transition ${compact ? "h-10 w-10 p-0" : "px-4 py-2 text-sm"} ${active ? "border-teal-950 bg-teal-950 text-white shadow-sm" : "border-teal-800 bg-teal-50 text-teal-950 hover:bg-teal-100"}`}
+    >
+      <MasteryGlyph />
+      {!compact && <span>학습 완료</span>}
+    </button>
+  );
+}
+
+function formatReviewDate(timestamp: number) {
+  return new Intl.DateTimeFormat("ko-KR", { month: "short", day: "numeric" }).format(timestamp);
 }
 
 function FavoriteToggle({
@@ -272,16 +322,27 @@ interface ChildPreview {
   error?: string;
 }
 
+interface ReviewStats {
+  reviewed: number;
+  success: number;
+  reset: number;
+  wordIds: string[];
+}
+
 function MorphemeComparisonGrid({
   parts,
   onExplore,
   hasFavoriteType,
   onToggleFavorite,
+  isMasteredResult,
+  onToggleMastery,
 }: {
   parts: Morpheme[];
   onExplore: (word: string) => void;
-  hasFavoriteType: (word: string, type: FavoriteType) => boolean;
+  hasFavoriteType: (word: string, type: FavoriteType, partOfSpeech?: string | null) => boolean;
   onToggleFavorite: (result: ParseResult, type: FavoriteType) => void;
+  isMasteredResult: (result: ParseResult) => boolean;
+  onToggleMastery: (result: ParseResult) => void;
 }) {
   const [previews, setPreviews] = useState<ChildPreview[]>([]);
 
@@ -337,8 +398,9 @@ function MorphemeComparisonGrid({
                 </div>
                 {child && (
                   <div className="flex items-center gap-2">
-                    <FavoriteToggle compact type="meaning" active={hasFavoriteType(child.word, "meaning")} onClick={() => onToggleFavorite(child, "meaning")} />
-                    <FavoriteToggle compact type="article" active={hasFavoriteType(child.word, "article")} disabled={!child.article} onClick={() => onToggleFavorite(child, "article")} />
+                    <FavoriteToggle compact type="meaning" active={hasFavoriteType(child.word, "meaning", child.partOfSpeech)} onClick={() => onToggleFavorite(child, "meaning")} />
+                    <FavoriteToggle compact type="article" active={hasFavoriteType(child.word, "article", child.partOfSpeech)} disabled={!child.article} onClick={() => onToggleFavorite(child, "article")} />
+                    <MasteryToggle compact active={isMasteredResult(child)} onClick={() => onToggleMastery(child)} />
                   </div>
                 )}
               </div>
@@ -384,6 +446,8 @@ export function WordWorkbench() {
   const [autocompleteIndex, setAutocompleteIndex] = useState(-1);
   const [favoriteFilter, setFavoriteFilter] = useState<FavoriteFilter>("all");
   const [favoriteSort, setFavoriteSort] = useState<FavoriteSort>("recent");
+  const [masteryScope, setMasteryScope] = useState<MasteryScope>("active");
+  const [now, setNow] = useState(() => Date.now());
   const [randomLevelRange, setRandomLevelRange] = useState<RandomLevelRange>("A1-B2");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -401,11 +465,21 @@ export function WordWorkbench() {
   const [articleQuizFinished, setArticleQuizFinished] = useState(false);
   const [articleQuizOpen, setArticleQuizOpen] = useState(false);
   const [articleHintVisible, setArticleHintVisible] = useState(false);
+  const [articleMeaningAssessment, setArticleMeaningAssessment] = useState<boolean | null>(null);
+  const [articleReviewedIds, setArticleReviewedIds] = useState<Set<string>>(() => new Set());
   const [wrongArticleQuestions, setWrongArticleQuestions] = useState<ArticleQuizQuestion[]>([]);
   const [articleQuizRound, setArticleQuizRound] = useState<"main" | "retry">("main");
   const [articleQuizMode, setArticleQuizMode] = useState<ArticleQuizMode>("database");
   const [expandedMorphemes, setExpandedMorphemes] = useState<Record<string, string[]>>({});
   const [favoriteRequestKey, setFavoriteRequestKey] = useState<string | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewQueue, setReviewQueue] = useState<string[]>([]);
+  const [reviewIndex, setReviewIndex] = useState(0);
+  const [reviewMeaningRevealed, setReviewMeaningRevealed] = useState(false);
+  const [reviewArticleRevealed, setReviewArticleRevealed] = useState(false);
+  const [reviewMeaningKnown, setReviewMeaningKnown] = useState<boolean | null>(null);
+  const [reviewArticleKnown, setReviewArticleKnown] = useState<boolean | null>(null);
+  const [reviewStats, setReviewStats] = useState<ReviewStats>({ reviewed: 0, success: 0, reset: 0, wordIds: [] });
   const searchFormRef = useRef<HTMLFormElement>(null);
 
   const autocompleteMatches = useMemo(
@@ -413,37 +487,36 @@ export function WordWorkbench() {
     [query, vocabulary],
   );
   const visibleFavorites = useMemo(
-    () => filterAndSortFavorites(favorites, favoriteFilter, favoriteSort),
-    [favoriteFilter, favoriteSort, favorites],
+    () => filterAndSortFavorites(favorites, favoriteFilter, favoriteSort, masteryScope),
+    [favoriteFilter, favoriteSort, favorites, masteryScope],
   );
   const favoriteNounCount = useMemo(
-    () => favorites.filter((item) => Boolean(item.article)).length,
-    [favorites],
+    () => favorites.filter((item) => Boolean(item.article) && (isReviewDue(item, now) || (!item.mastery && getFavoriteTypes(item).includes("article")))).length,
+    [favorites, now],
   );
   const databaseNounCount = useMemo(
     () => vocabulary.filter((item) => item.level === level && Boolean(item.article)).length,
     [level, vocabulary],
   );
   const randomCandidates = useMemo(
-    () => vocabularyForRandom(vocabulary, randomLevelRange),
-    [randomLevelRange, vocabulary],
+    () => vocabularyForRandom(vocabulary, randomLevelRange, favorites),
+    [favorites, randomLevelRange, vocabulary],
   );
+  const dueWords = useMemo(() => dueMasteredWords(favorites, now), [favorites, now]);
+  const nextReviewAt = useMemo(() => nextUpcomingReviewAt(favorites, now), [favorites, now]);
+  const clozeWords = useMemo(() => buildClozeWordPool(favorites, now), [favorites, now]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       try {
         const saved = localStorage.getItem(STORAGE_KEY);
-        const parsed = saved ? JSON.parse(saved) as unknown : [];
-        if (Array.isArray(parsed)) {
-          const stored = parsed.filter(isFavoriteWord);
-          const now = Date.now();
-          setFavorites(stored.map((item, index) => ({
-            ...item,
-            favoriteTypes: getFavoriteTypes(item),
-            level: isAffixWord(item.word, item.partOfSpeech) ? null : item.level,
-            addedAt: item.addedAt ?? now - ((stored.length - index) * 1_000),
-          })));
-        }
+        const migrated = migrateWordbookState(saved ? JSON.parse(saved) as unknown : [], Date.now());
+        const words = migrated.words.map((item) => ({
+          ...item,
+          level: isAffixWord(item.word, item.partOfSpeech) ? null : item.level,
+        }));
+        setFavorites(words);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: 2, words } satisfies WordbookState));
       } catch {
         localStorage.removeItem(STORAGE_KEY);
       }
@@ -489,7 +562,7 @@ export function WordWorkbench() {
       });
       if (changed) {
         try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+          localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: 2, words: next } satisfies WordbookState));
         } catch {
           // The in-memory wordbook remains available if storage is unavailable.
         }
@@ -575,44 +648,51 @@ export function WordWorkbench() {
     setFavorites((current) => {
       const next = updater(current);
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: 2, words: next } satisfies WordbookState));
       } catch {
         // Keep the in-memory wordbook usable when browser storage is unavailable.
       }
       return next;
     });
+    setNow(Date.now());
   }
 
   function addFavoriteTypeFromResult(result: ParseResult, type: FavoriteType) {
-    const key = normalizedWord(result.word);
+    const id = createWordId(result.word, result.partOfSpeech);
     updateFavorites((current) => {
-      const existing = current.find((item) => normalizedWord(item.word) === key);
+      const existing = current.find((item) => item.id === id);
+      if (existing?.mastery) {
+        return current.map((item) => item.id === id
+          ? favoriteFromResult(result, [type], activateUnknownType(existing, type))
+          : item);
+      }
       const types = existing ? getFavoriteTypes(existing) : [];
       const nextTypes = types.includes(type) ? types : [...types, type];
       const nextFavorite = favoriteFromResult(result, nextTypes, existing);
       return existing
-        ? current.map((item) => normalizedWord(item.word) === key ? nextFavorite : item)
+        ? current.map((item) => item.id === id ? nextFavorite : item)
         : [...current, nextFavorite];
     });
   }
 
-  function removeFavoriteType(word: string, type: FavoriteType) {
-    const key = normalizedWord(word);
+  function removeFavoriteType(id: string, type: FavoriteType) {
     updateFavorites((current) => current.flatMap((item): FavoriteWord[] => {
-      if (normalizedWord(item.word) !== key) return [item];
+      if (item.id !== id) return [item];
       const nextTypes = getFavoriteTypes(item).filter((favoriteType) => favoriteType !== type);
       return nextTypes.length ? [{ ...item, favoriteTypes: nextTypes }] : [];
     }));
-    setFavoritePopover((current) => current?.owner === word ? null : current);
   }
 
-  async function toggleFavoriteByWord(word: string, type: FavoriteType) {
-    if (hasFavoriteType(word, type)) {
-      removeFavoriteType(word, type);
+  async function toggleFavoriteByWord(word: string, type: FavoriteType, favoriteId?: string) {
+    const existing = favoriteId
+      ? favorites.find((item) => item.id === favoriteId)
+      : favorites.find((item) => item.word === word);
+    if (existing && getFavoriteTypes(existing).includes(type)) {
+      removeFavoriteType(existing.id, type);
       return;
     }
 
-    const requestKey = `${normalizedWord(word)}:${type}`;
+    const requestKey = `${favoriteId ?? word}:${type}`;
     setFavoriteRequestKey(requestKey);
     try {
       addFavoriteTypeFromResult(await requestWord(word), type);
@@ -624,9 +704,9 @@ export function WordWorkbench() {
   }
 
   function syncFavoriteData(result: ParseResult) {
-    const key = normalizedWord(result.word);
-    updateFavorites((current) => current.some((item) => normalizedWord(item.word) === key)
-      ? current.map((item) => normalizedWord(item.word) === key
+    const id = createWordId(result.word, result.partOfSpeech);
+    updateFavorites((current) => current.some((item) => item.id === id)
+      ? current.map((item) => item.id === id
           ? favoriteFromResult(result, getFavoriteTypes(item), item)
           : item)
       : current);
@@ -719,8 +799,49 @@ export function WordWorkbench() {
   }
 
   function toggleFavoriteType(result: ParseResult, type: FavoriteType) {
-    if (hasFavoriteType(result.word, type)) removeFavoriteType(result.word, type);
+    const id = createWordId(result.word, result.partOfSpeech);
+    if (hasFavoriteType(result.word, type, result.partOfSpeech)) removeFavoriteType(id, type);
     else addFavoriteTypeFromResult(result, type);
+  }
+
+  function toggleMasteryById(id: string) {
+    updateFavorites((current) => current.map((item) => item.id === id
+      ? item.mastery ? removeMastery(item) : markMastered(item, Date.now())
+      : item));
+  }
+
+  function toggleMasteryForResult(result: ParseResult) {
+    const id = createWordId(result.word, result.partOfSpeech);
+    updateFavorites((current) => {
+      const existing = current.find((item) => item.id === id);
+      if (existing) {
+        return current.map((item) => item.id === id
+          ? item.mastery ? removeMastery(item) : markMastered(favoriteFromResult(result, getFavoriteTypes(item), item), Date.now())
+          : item);
+      }
+      return [...current, markMastered(favoriteFromResult(result, ["meaning"]), Date.now())];
+    });
+  }
+
+  function isMasteredResult(result: ParseResult) {
+    return Boolean(favorites.find((item) => item.id === createWordId(result.word, result.partOfSpeech))?.mastery);
+  }
+
+  async function toggleMasteryForQuestion(question: ArticleQuizQuestion) {
+    const existing = favorites.find((item) => item.id === question.id);
+    if (existing) {
+      toggleMasteryById(existing.id);
+      return;
+    }
+    const requestKey = `${question.id}:mastery`;
+    setFavoriteRequestKey(requestKey);
+    try {
+      toggleMasteryForResult(await requestWord(question.word));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "학습 완료 저장에 실패했습니다.");
+    } finally {
+      setFavoriteRequestKey((current) => current === requestKey ? null : current);
+    }
   }
 
   function selectHistoryStep(index: number) {
@@ -768,6 +889,7 @@ export function WordWorkbench() {
       level,
       favorites,
       vocabulary,
+      now: Date.now(),
     });
     if (!next.length) {
       setError(articleQuizMode === "favorites"
@@ -783,6 +905,8 @@ export function WordWorkbench() {
     setArticleScore(0);
     setArticleQuizFinished(false);
     setArticleHintVisible(false);
+    setArticleMeaningAssessment(null);
+    setArticleReviewedIds(new Set());
     setWrongArticleQuestions([]);
     setArticleQuizRound("main");
     setArticleQuizOpen(true);
@@ -792,7 +916,13 @@ export function WordWorkbench() {
     if (articleAnswer) return;
     setArticleAnswer(answer);
     const question = articleQuestions[articleQuestionIndex];
-    if (question && isCorrectArticleAnswer(question, answer)) {
+    const correct = Boolean(question && isCorrectArticleAnswer(question, answer));
+    if (question?.favoriteId) {
+      updateFavorites((current) => current.map((item) => item.id === question.favoriteId
+        ? recordArticleAnswer(item, correct, Date.now())
+        : item));
+    }
+    if (correct) {
       setArticleScore((score) => score + 1);
     } else {
       if (question) setWrongArticleQuestions((items) => [...items, question]);
@@ -800,6 +930,8 @@ export function WordWorkbench() {
   }
 
   function nextArticleQuestion() {
+    const currentQuestion = articleQuestions[articleQuestionIndex];
+    if (currentQuestion?.reviewDue && articleMeaningAssessment === null) return;
     if (articleQuestionIndex + 1 >= articleQuestions.length) {
       setArticleQuizFinished(true);
       return;
@@ -807,15 +939,35 @@ export function WordWorkbench() {
     setArticleQuestionIndex((index) => index + 1);
     setArticleAnswer(null);
     setArticleHintVisible(false);
+    setArticleMeaningAssessment(null);
+  }
+
+  function assessArticleReviewMeaning(meaningKnown: boolean) {
+    const question = articleQuestions[articleQuestionIndex];
+    if (!question?.favoriteId || articleReviewedIds.has(question.favoriteId) || !articleAnswer) return;
+    const reviewNow = Date.now();
+    updateFavorites((current) => current.map((item) => item.id === question.favoriteId
+      ? applyReview(item, {
+          meaningKnown,
+          articleKnown: isCorrectArticleAnswer(question, articleAnswer),
+        }, reviewNow)
+      : item));
+    setArticleMeaningAssessment(meaningKnown);
+    setArticleReviewedIds((current) => new Set(current).add(question.favoriteId!));
   }
 
   function retryWrongArticles() {
-    setArticleQuestions(shuffleItems(wrongArticleQuestions));
+    setArticleQuestions(shuffleItems(wrongArticleQuestions).map((question) => (
+      question.favoriteId && articleReviewedIds.has(question.favoriteId)
+        ? { ...question, reviewDue: false }
+        : question
+    )));
     setArticleQuestionIndex(0);
     setArticleAnswer(null);
     setArticleScore(0);
     setArticleQuizFinished(false);
     setArticleHintVisible(false);
+    setArticleMeaningAssessment(null);
     setWrongArticleQuestions([]);
     setArticleQuizRound("retry");
   }
@@ -840,7 +992,7 @@ export function WordWorkbench() {
       const response = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ words: favorites, level }),
+        body: JSON.stringify({ words: clozeWords, level }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "퀴즈 생성에 실패했습니다.");
@@ -853,12 +1005,59 @@ export function WordWorkbench() {
     }
   }
 
-  function hasFavoriteType(word: string, type: FavoriteType) {
-    const favorite = favorites.find((item) => normalizedWord(item.word) === normalizedWord(word));
+  function hasFavoriteType(word: string, type: FavoriteType, partOfSpeech?: string | null, favoriteId?: string) {
+    const favorite = favoriteId
+      ? favorites.find((item) => item.id === favoriteId)
+      : partOfSpeech !== undefined
+        ? favorites.find((item) => item.id === createWordId(word, partOfSpeech))
+        : favorites.find((item) => item.word === word);
     return favorite ? getFavoriteTypes(favorite).includes(type) : false;
   }
 
+  function startDailyReview() {
+    const reviewNow = Date.now();
+    setNow(reviewNow);
+    const queue = dueMasteredWords(favorites, reviewNow).map((word) => word.id);
+    if (!queue.length) return;
+    setReviewQueue(queue);
+    setReviewIndex(0);
+    setReviewMeaningRevealed(false);
+    setReviewArticleRevealed(false);
+    setReviewMeaningKnown(null);
+    setReviewArticleKnown(null);
+    setReviewStats({ reviewed: 0, success: 0, reset: 0, wordIds: [] });
+    setReviewOpen(true);
+  }
+
+  function submitDailyReview() {
+    const id = reviewQueue[reviewIndex];
+    const word = favorites.find((item) => item.id === id);
+    if (!word || reviewMeaningKnown === null || (word.article && reviewArticleKnown === null)) return;
+    const assessment = { meaningKnown: reviewMeaningKnown, articleKnown: word.article ? reviewArticleKnown : null };
+    const success = reviewSucceeded(word, assessment);
+    updateFavorites((current) => current.map((item) => item.id === id
+      ? applyReview(item, assessment, Date.now())
+      : item));
+    setReviewStats((current) => ({
+      reviewed: current.reviewed + 1,
+      success: current.success + Number(success),
+      reset: current.reset + Number(!success),
+      wordIds: [...current.wordIds, id],
+    }));
+    setReviewIndex((index) => index + 1);
+    setReviewMeaningRevealed(false);
+    setReviewArticleRevealed(false);
+    setReviewMeaningKnown(null);
+    setReviewArticleKnown(null);
+  }
+
   const articleQuestion = articleQuestions[articleQuestionIndex];
+  const articleFavorite = articleQuestion
+    ? favorites.find((item) => item.id === articleQuestion.id)
+    : undefined;
+  const reviewWord = reviewQueue[reviewIndex]
+    ? favorites.find((item) => item.id === reviewQueue[reviewIndex])
+    : undefined;
   const autocompleteVisible = autocompleteOpen && Boolean(query.trim()) && autocompleteMatches.length > 0;
 
   return (
@@ -974,8 +1173,9 @@ export function WordWorkbench() {
 
               <div className="space-y-6 pt-8">
                 {results.map((result, resultIndex) => {
-                  const meaningFavorite = hasFavoriteType(result.word, "meaning");
-                  const articleFavorite = hasFavoriteType(result.word, "article");
+                  const meaningFavorite = hasFavoriteType(result.word, "meaning", result.partOfSpeech);
+                  const articleFavorite = hasFavoriteType(result.word, "article", result.partOfSpeech);
+                  const mastered = isMasteredResult(result);
                   const current = resultIndex === results.length - 1;
                   const terminal = isTerminalResult(result);
                   const detailKey = `${resultIndex}:${result.word}`;
@@ -997,6 +1197,7 @@ export function WordWorkbench() {
                         <div className="flex flex-wrap justify-end gap-2">
                           <FavoriteToggle type="meaning" active={meaningFavorite} onClick={() => toggleFavoriteType(result, "meaning")} />
                           {result.article && <FavoriteToggle type="article" active={articleFavorite} onClick={() => toggleFavoriteType(result, "article")} />}
+                          <MasteryToggle active={mastered} onClick={() => toggleMasteryForResult(result)} />
                         </div>
                       </div>
 
@@ -1045,6 +1246,8 @@ export function WordWorkbench() {
                           onExplore={(word) => void search(word, results.slice(0, resultIndex + 1))}
                           hasFavoriteType={hasFavoriteType}
                           onToggleFavorite={toggleFavoriteType}
+                          isMasteredResult={isMasteredResult}
+                          onToggleMastery={toggleMasteryForResult}
                         />
                       )}
                     </section>
@@ -1064,22 +1267,52 @@ export function WordWorkbench() {
               <h2 className="mt-2 font-serif text-3xl">저장한 단어</h2>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              <div role="group" aria-label="학습 완료 범위" className="flex rounded-xl border border-teal-900/20 bg-white p-1">
+                {([
+                  ["active", "완료 숨김"],
+                  ["include", "완료 포함"],
+                  ["mastered", "완료만"],
+                ] as const).map(([value, label]) => (
+                  <button
+                    type="button"
+                    key={value}
+                    aria-pressed={masteryScope === value}
+                    onClick={() => {
+                      setMasteryScope(value);
+                      if (value === "mastered") setFavoriteFilter("all");
+                    }}
+                    className={`rounded-lg px-3 py-2 text-xs font-bold transition ${masteryScope === value ? "bg-teal-950 text-white" : "text-teal-950/60 hover:bg-teal-50"}`}
+                  >{label}</button>
+                ))}
+              </div>
               <div role="group" aria-label="별표 유형 필터" className="flex rounded-xl border border-ink/15 bg-white p-1">
                 {([
                   ["all", "전체"],
                   ["meaning", "뜻 모름"],
                   ["article", "관사 모름"],
                 ] as const).map(([value, label]) => (
-                  <button type="button" key={value} aria-pressed={favoriteFilter === value} onClick={() => setFavoriteFilter(value)} className={`rounded-lg px-3 py-2 text-xs font-bold transition ${favoriteFilter === value ? "bg-ink text-white" : "text-ink/55 hover:bg-paper"}`}>{label}</button>
+                  <button type="button" key={value} disabled={masteryScope === "mastered"} aria-pressed={favoriteFilter === value} onClick={() => setFavoriteFilter(value)} className={`rounded-lg px-3 py-2 text-xs font-bold transition disabled:cursor-not-allowed disabled:opacity-35 ${favoriteFilter === value ? "bg-ink text-white" : "text-ink/55 hover:bg-paper"}`}>{label}</button>
                 ))}
               </div>
               <label htmlFor="favorite-sort" className="sr-only">단어장 정렬</label>
               <select suppressHydrationWarning id="favorite-sort" value={favoriteSort} onChange={(event) => setFavoriteSort(event.target.value as FavoriteSort)} className="rounded-xl border border-ink/15 bg-white px-3 py-2.5 text-xs font-bold outline-none focus:border-moss">
                 <option value="recent">최신 추가순</option>
                 <option value="alphabetical">알파벳순</option>
+                <option value="review">복습일순</option>
               </select>
             </div>
           </header>
+
+          <div className="mx-5 rounded-[2rem] border border-teal-900/20 bg-teal-950 p-6 text-white shadow-card sm:mx-8 sm:p-8 lg:mx-12">
+            <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[0.22em] text-teal-100/60">오늘의 복습</p>
+                <p className="mt-2 font-serif text-3xl font-bold">지금 복습할 단어 {dueWords.length}개</p>
+                <p className="mt-2 text-sm text-white/55">{nextReviewAt ? `다음 예정 ${formatReviewDate(nextReviewAt)}` : dueWords.length ? "예정된 단어가 모두 오늘 복습 대상입니다." : "예정된 복습이 없습니다."}</p>
+              </div>
+              <button type="button" disabled={!dueWords.length} onClick={startDailyReview} className="rounded-2xl bg-white px-6 py-4 text-sm font-black text-teal-950 transition hover:bg-teal-50 disabled:cursor-not-allowed disabled:opacity-35">복습 시작 →</button>
+            </div>
+          </div>
 
           {favorites.length ? (
             visibleFavorites.length ? (
@@ -1093,18 +1326,22 @@ export function WordWorkbench() {
                       const parts = favoriteMorphemes(item);
                       const types = getFavoriteTypes(item);
                       return (
-                        <tr key={item.word} className="border-t border-ink/10 align-top transition hover:bg-paper/45">
+                        <tr key={item.id} className="border-t border-ink/10 align-top transition hover:bg-paper/45">
                           <td className="px-5 py-5 lg:pl-12">
                             {item.article ? <span className={`inline-flex min-w-12 justify-center rounded-xl border px-3 py-1.5 font-serif text-base font-bold ${articleStyle[item.article]}`}>{item.article}</span> : <span className="pl-3 text-ink/30">—</span>}
                           </td>
                           <td className="px-4 py-5">
                             <button type="button" onClick={() => openFavorite(item.word)} className="whitespace-nowrap font-serif text-lg font-bold underline decoration-moss/25 underline-offset-4 transition hover:text-moss">{item.word} →</button>
+                            {item.mastery && (isReviewDue(item, now)
+                              ? <span className="mt-2 block w-fit rounded-full bg-amber-100 px-2 py-1 text-[10px] font-black text-amber-900">복습 오늘</span>
+                              : <span className="mt-2 block text-[10px] font-bold text-teal-900/55">다음 복습 {formatReviewDate(item.mastery.nextReviewAt)}</span>)}
                           </td>
                           <td className="px-4 py-5"><LevelBadge level={item.level} /></td>
                           <td className="px-4 py-5">
                             <div className="flex gap-2">
-                              <FavoriteToggle compact type="meaning" active={types.includes("meaning")} disabled={favoriteRequestKey === `${normalizedWord(item.word)}:meaning`} onClick={() => void toggleFavoriteByWord(item.word, "meaning")} />
-                              <FavoriteToggle compact type="article" active={types.includes("article")} disabled={!item.article || favoriteRequestKey === `${normalizedWord(item.word)}:article`} onClick={() => void toggleFavoriteByWord(item.word, "article")} />
+                              <FavoriteToggle compact type="meaning" active={types.includes("meaning")} disabled={favoriteRequestKey === `${item.id}:meaning`} onClick={() => void toggleFavoriteByWord(item.word, "meaning", item.id)} />
+                              <FavoriteToggle compact type="article" active={types.includes("article")} disabled={!item.article || favoriteRequestKey === `${item.id}:article`} onClick={() => void toggleFavoriteByWord(item.word, "article", item.id)} />
+                              <MasteryToggle compact active={Boolean(item.mastery)} onClick={() => toggleMasteryById(item.id)} />
                             </div>
                           </td>
                           <td className="max-w-sm px-4 py-5 leading-6 text-ink/65">{item.meaning}</td>
@@ -1165,8 +1402,9 @@ export function WordWorkbench() {
               </div>
               <div className="mt-5 flex gap-2">
                 <select suppressHydrationWarning id="level" name="level" aria-label="퀴즈 난이도" value={level} onChange={(event) => setLevel(event.target.value as CefrLevel)} className="rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-white outline-none">{(["A1", "A2", "B1", "B2"] as CefrLevel[]).map((item) => <option className="text-ink" key={item} value={item}>{item}</option>)}</select>
-                <button type="button" disabled={!favorites.length || quizLoading} onClick={() => void generateExercises()} className="flex-1 rounded-xl bg-coral px-4 py-2 text-sm font-bold hover:bg-[#c95e52] disabled:opacity-40">{quizLoading ? "문장 만드는 중…" : "AI 퀴즈 만들기"}</button>
+                <button type="button" disabled={!AI_ENABLED || !clozeWords.length || quizLoading} onClick={() => void generateExercises()} className="flex-1 rounded-xl bg-coral px-4 py-2 text-sm font-bold hover:bg-[#c95e52] disabled:cursor-not-allowed disabled:opacity-40">{quizLoading ? "문장 만드는 중…" : AI_ENABLED ? "AI 퀴즈 만들기" : "AI 퀴즈 비활성화"}</button>
               </div>
+              {!AI_ENABLED && <p className="mt-3 text-center text-xs leading-5 text-white/45">AI 예문 생성은 현재 비활성화되어 있습니다.</p>}
               {exercises.length ? <ol className="mt-6 space-y-5">{exercises.map((item, index) => (
                 <li key={`${item.answer}-${index}`} className="border-b border-white/10 pb-5 last:border-0">
                   <p className="font-serif text-lg font-semibold">{index + 1}. {showAnswers ? item.sentence : item.cloze}</p>
@@ -1177,6 +1415,66 @@ export function WordWorkbench() {
             </div>
           </div>
         </section>
+      )}
+
+      {reviewOpen && (
+        <div className="fixed inset-0 z-[80] overflow-y-auto bg-teal-950 text-white">
+          <div className="mx-auto flex min-h-full max-w-3xl flex-col px-5 py-6 sm:px-8 sm:py-10">
+            <header className="flex items-center justify-between border-b border-white/15 pb-5">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-teal-100/55">오늘의 복습</p>
+                <p className="mt-1 font-serif text-xl font-bold">Spaced Review</p>
+              </div>
+              <button type="button" onClick={() => setReviewOpen(false)} aria-label="오늘의 복습 닫기" className="grid h-11 w-11 place-items-center rounded-full border border-white/20 text-2xl text-white/65 transition hover:text-white">×</button>
+            </header>
+
+            {reviewIndex >= reviewQueue.length ? (
+              <div className="grid flex-1 place-items-center py-12 text-center">
+                <div className="w-full max-w-xl rounded-[2rem] bg-white p-8 text-ink shadow-2xl sm:p-12">
+                  <MasteryGlyph />
+                  <p className="mt-4 text-sm font-black text-teal-900">오늘의 복습 완료</p>
+                  <p className="mt-3 font-serif text-5xl font-bold">{reviewStats.reviewed}개</p>
+                  <div className="mt-6 grid grid-cols-2 gap-3">
+                    <div className="rounded-2xl bg-teal-50 p-4"><p className="text-2xl font-black text-teal-950">{reviewStats.success}</p><p className="mt-1 text-xs text-ink/50">성공</p></div>
+                    <div className="rounded-2xl bg-amber-50 p-4"><p className="text-2xl font-black text-amber-900">{reviewStats.reset}</p><p className="mt-1 text-xs text-ink/50">1일로 재설정</p></div>
+                  </div>
+                  <ul className="mt-6 space-y-2 text-left">
+                    {reviewStats.wordIds.map((id) => {
+                      const word = favorites.find((item) => item.id === id);
+                      return word ? <li key={id} className="flex items-center justify-between rounded-xl border border-ink/10 px-4 py-3"><span className="font-serif font-bold">{word.word}</span><MasteryToggle compact active={Boolean(word.mastery)} onClick={() => toggleMasteryById(word.id)} /></li> : null;
+                    })}
+                  </ul>
+                  <button type="button" onClick={() => setReviewOpen(false)} className="mt-7 w-full rounded-2xl bg-teal-950 px-6 py-4 font-bold text-white">단어장으로 돌아가기</button>
+                </div>
+              </div>
+            ) : reviewWord ? (
+              <div className="flex flex-1 flex-col justify-center py-8 sm:py-12">
+                <div className="mb-4 flex items-center justify-between text-xs font-bold text-white/50"><span>{reviewIndex + 1} / {reviewQueue.length}</span><span>{reviewWord.mastery?.reviewStep ?? 0}단계</span></div>
+                <div className="h-2 overflow-hidden rounded-full bg-white/15"><div style={{ width: `${((reviewIndex + 1) / reviewQueue.length) * 100}%` }} className="h-full rounded-full bg-teal-300 transition-all" /></div>
+                <section className="mt-6 rounded-[2rem] bg-white p-6 text-ink shadow-2xl sm:p-10">
+                  <p className="text-xs font-black uppercase tracking-[0.2em] text-teal-900/45">Erinnerst du dich?</p>
+                  <h2 className="mt-4 font-serif text-5xl font-bold sm:text-7xl">{reviewWord.word}</h2>
+
+                  <div className={`mt-8 grid gap-4 ${reviewWord.article ? "sm:grid-cols-2" : ""}`}>
+                    {reviewWord.article && (
+                      <div className="rounded-2xl border border-orange-200 bg-orange-50 p-4">
+                        {!reviewArticleRevealed ? <button type="button" onClick={() => setReviewArticleRevealed(true)} className="w-full rounded-xl border border-orange-300 bg-white px-4 py-3 font-bold text-orange-800">관사 보기</button> : (
+                          <><p className="text-center font-serif text-3xl font-bold text-orange-900">{reviewWord.article}</p><div className="mt-4 grid grid-cols-2 gap-2"><button type="button" aria-pressed={reviewArticleKnown === true} onClick={() => setReviewArticleKnown(true)} className={`rounded-xl px-3 py-2 font-bold ${reviewArticleKnown === true ? "bg-teal-900 text-white" : "bg-white text-teal-950"}`}>앎</button><button type="button" aria-pressed={reviewArticleKnown === false} onClick={() => setReviewArticleKnown(false)} className={`rounded-xl px-3 py-2 font-bold ${reviewArticleKnown === false ? "bg-red-700 text-white" : "bg-white text-red-800"}`}>모름</button></div></>
+                        )}
+                      </div>
+                    )}
+                    <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+                      {!reviewMeaningRevealed ? <button type="button" onClick={() => setReviewMeaningRevealed(true)} className="w-full rounded-xl border border-blue-300 bg-white px-4 py-3 font-bold text-blue-800">뜻 보기</button> : (
+                        <><p className="min-h-12 text-sm leading-6 text-blue-950">{reviewWord.meaning}</p><div className="mt-4 grid grid-cols-2 gap-2"><button type="button" aria-pressed={reviewMeaningKnown === true} onClick={() => setReviewMeaningKnown(true)} className={`rounded-xl px-3 py-2 font-bold ${reviewMeaningKnown === true ? "bg-teal-900 text-white" : "bg-white text-teal-950"}`}>앎</button><button type="button" aria-pressed={reviewMeaningKnown === false} onClick={() => setReviewMeaningKnown(false)} className={`rounded-xl px-3 py-2 font-bold ${reviewMeaningKnown === false ? "bg-red-700 text-white" : "bg-white text-red-800"}`}>모름</button></div></>
+                      )}
+                    </div>
+                  </div>
+                  <button type="button" disabled={reviewMeaningKnown === null || Boolean(reviewWord.article && reviewArticleKnown === null)} onClick={submitDailyReview} className="mt-6 w-full rounded-2xl bg-teal-950 px-6 py-4 font-bold text-white transition disabled:cursor-not-allowed disabled:opacity-30">{reviewIndex + 1 === reviewQueue.length ? "복습 결과 보기 →" : "다음 단어 →"}</button>
+                </section>
+              </div>
+            ) : null}
+          </div>
+        </div>
       )}
 
       {articleQuizOpen && articleQuestion && (
@@ -1221,8 +1519,8 @@ export function WordWorkbench() {
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <FavoriteToggle compact type="meaning" active={hasFavoriteType(articleQuestion.word, "meaning")} disabled={favoriteRequestKey === `${normalizedWord(articleQuestion.word)}:meaning`} onClick={() => void toggleFavoriteByWord(articleQuestion.word, "meaning")} />
-                      <FavoriteToggle compact type="article" active={hasFavoriteType(articleQuestion.word, "article")} disabled={favoriteRequestKey === `${normalizedWord(articleQuestion.word)}:article`} onClick={() => void toggleFavoriteByWord(articleQuestion.word, "article")} />
+                      <FavoriteToggle compact type="meaning" active={hasFavoriteType(articleQuestion.word, "meaning", undefined, articleQuestion.favoriteId)} disabled={favoriteRequestKey === `${articleQuestion.favoriteId ?? articleQuestion.word}:meaning`} onClick={() => void toggleFavoriteByWord(articleQuestion.word, "meaning", articleQuestion.favoriteId)} />
+                      <FavoriteToggle compact type="article" active={hasFavoriteType(articleQuestion.word, "article", undefined, articleQuestion.favoriteId)} disabled={favoriteRequestKey === `${articleQuestion.favoriteId ?? articleQuestion.word}:article`} onClick={() => void toggleFavoriteByWord(articleQuestion.word, "article", articleQuestion.favoriteId)} />
                     </div>
                   </div>
 
@@ -1242,7 +1540,21 @@ export function WordWorkbench() {
                     <div role="status" className="mt-6 rounded-2xl border border-blue-200 bg-blue-50 p-5 text-sm leading-6 text-blue-950">
                       <p className="text-base font-bold">{articleAnswer === articleQuestion.article ? "정답입니다!" : `정답은 ${articleQuestion.article}입니다.`}</p>
                       <p className="mt-2 text-blue-950/70">{articleQuestion.reason}</p>
-                      <button type="button" onClick={nextArticleQuestion} className="mt-5 w-full rounded-2xl bg-blue-950 px-6 py-4 text-base font-bold text-white shadow-md transition hover:bg-moss">{articleQuestionIndex + 1 === articleQuestions.length ? "결과 확인하기 →" : "다음 문제 →"}</button>
+                      {articleQuestion.reviewDue && (
+                        <div className="mt-5 rounded-2xl border border-teal-900/15 bg-white p-4 text-ink">
+                          <p className="text-sm leading-6"><strong>뜻:</strong> {articleQuestion.meaning}</p>
+                          <p className="mt-3 text-xs font-bold text-ink/50">뜻도 기억했나요?</p>
+                          <div className="mt-2 grid grid-cols-2 gap-2">
+                            <button type="button" disabled={articleMeaningAssessment !== null} onClick={() => assessArticleReviewMeaning(true)} className={`rounded-xl border px-4 py-3 font-bold ${articleMeaningAssessment === true ? "border-teal-900 bg-teal-900 text-white" : "border-teal-900/20 bg-teal-50 text-teal-950"}`}>앎</button>
+                            <button type="button" disabled={articleMeaningAssessment !== null} onClick={() => assessArticleReviewMeaning(false)} className={`rounded-xl border px-4 py-3 font-bold ${articleMeaningAssessment === false ? "border-red-700 bg-red-700 text-white" : "border-red-200 bg-red-50 text-red-800"}`}>모름</button>
+                          </div>
+                        </div>
+                      )}
+                      {articleFavorite && shouldSuggestMastery(articleFavorite) && (
+                        <button type="button" onClick={() => toggleMasteryById(articleFavorite.id)} className="mt-4 inline-flex items-center gap-2 rounded-full border border-teal-900 bg-teal-50 px-4 py-2 font-bold text-teal-950"><MasteryGlyph /> 학습 완료로 표시</button>
+                      )}
+                      <div className="mt-4"><MasteryToggle compact active={Boolean(articleFavorite?.mastery)} onClick={() => void toggleMasteryForQuestion(articleQuestion)} /></div>
+                      <button type="button" disabled={articleQuestion.reviewDue && articleMeaningAssessment === null} onClick={nextArticleQuestion} className="mt-5 w-full rounded-2xl bg-blue-950 px-6 py-4 text-base font-bold text-white shadow-md transition hover:bg-moss disabled:cursor-not-allowed disabled:opacity-35">{articleQuestionIndex + 1 === articleQuestions.length ? "결과 확인하기 →" : "다음 문제 →"}</button>
                     </div>
                   )}
                 </section>

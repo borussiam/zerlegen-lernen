@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { FavoriteWord, VocabularyIndexEntry } from "./types";
 import { articleReasonText, buildArticleQuizQuestions, isCorrectArticleAnswer } from "./article-quiz";
+import { DAY_MS, createWordId, markMastered } from "./spaced-repetition";
+
+const NOW = 1_000_000;
 
 const favorites: FavoriteWord[] = [
-  { word: "Haus", article: "das", meaning: "house", level: "A1", favoriteTypes: ["article"] },
-  { word: "Zeitung", article: "die", meaning: "newspaper", level: "A2", favoriteTypes: ["meaning"] },
-  { word: "lernen", article: null, meaning: "to learn", level: "A1", favoriteTypes: ["meaning"] },
-  { word: "haus", article: "das", meaning: "duplicate house", level: "A1", favoriteTypes: ["meaning"] },
+  { id: createWordId("Haus", "Noun"), word: "Haus", article: "das", meaning: "house", partOfSpeech: "Noun", level: "A1", favoriteTypes: ["article"] },
+  { id: createWordId("Zeitung", "Noun"), word: "Zeitung", article: "die", meaning: "newspaper", partOfSpeech: "Noun", level: "A2", favoriteTypes: ["meaning"] },
+  { id: createWordId("lernen", "Verb"), word: "lernen", article: null, meaning: "to learn", partOfSpeech: "Verb", level: "A1", favoriteTypes: ["meaning"] },
+  { id: createWordId("haus", "Noun"), word: "haus", article: "das", meaning: "duplicate house", partOfSpeech: "Noun", level: "A1", favoriteTypes: ["meaning"] },
 ];
 
 const vocabulary: VocabularyIndexEntry[] = [
@@ -17,7 +20,7 @@ const vocabulary: VocabularyIndexEntry[] = [
 ];
 
 describe("buildArticleQuizQuestions", () => {
-  it("uses only unique nouns from favorites in favorite mode", () => {
+  it("uses active article-unknown words from favorites", () => {
     const questions = buildArticleQuizQuestions({
       mode: "favorites",
       level: "A1",
@@ -25,8 +28,47 @@ describe("buildArticleQuizQuestions", () => {
       vocabulary,
       random: () => 0.5,
     });
-    expect(questions).toHaveLength(2);
-    expect(new Set(questions.map((question) => question.word.toLowerCase()))).toEqual(new Set(["haus", "zeitung"]));
+    expect(questions.map((question) => question.word)).toEqual(["Haus"]);
+  });
+
+  it("prioritizes due mastery, then active article-unknown words, and omits future mastery", () => {
+    const due = markMastered({ ...favorites[1], level: "A1" }, NOW - DAY_MS);
+    const future = markMastered({
+      ...favorites[0],
+      id: createWordId("Buch", "Noun"),
+      word: "Buch",
+    }, NOW);
+    const questions = buildArticleQuizQuestions({
+      mode: "favorites",
+      level: "A1",
+      favorites: [favorites[0], due, future],
+      vocabulary,
+      now: NOW,
+      random: () => 0.5,
+    });
+    expect(questions.map((question) => question.word)).toEqual(["Zeitung", "Haus"]);
+    expect(questions[0].reviewDue).toBe(true);
+  });
+
+  it("does not leak a non-due mastered word back through the database pool", () => {
+    const futureSchool = markMastered({
+      id: createWordId("Schule", "Noun"),
+      word: "Schule",
+      article: "die",
+      meaning: "school",
+      partOfSpeech: "Noun",
+      level: "A1",
+      favoriteTypes: ["article"],
+    }, NOW);
+    const questions = buildArticleQuizQuestions({
+      mode: "database",
+      level: "A1",
+      favorites: [futureSchool],
+      vocabulary,
+      now: NOW,
+      random: () => 0.5,
+    });
+    expect(questions.map((question) => question.word)).not.toContain("Schule");
   });
 
   it("filters database questions by selected CEFR level and article", () => {
@@ -37,7 +79,7 @@ describe("buildArticleQuizQuestions", () => {
       vocabulary,
       random: () => 0.5,
     });
-    expect(questions.map((question) => question.word).sort()).toEqual(["Apfel", "Schule"]);
+    expect(questions.map((question) => question.word).sort()).toEqual(["Apfel", "Haus", "Schule"]);
     expect(questions.every((question) => question.level === "A1" && question.article)).toBe(true);
   });
 

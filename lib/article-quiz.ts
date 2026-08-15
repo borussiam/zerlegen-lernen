@@ -1,14 +1,18 @@
 import type { Article, CefrLevel, FavoriteWord, VocabularyIndexEntry } from "./types";
+import { createWordId, getStoredFavoriteTypes, isReviewDue } from "./spaced-repetition";
 
 export type DefiniteArticle = Exclude<Article, null>;
 export type ArticleQuizMode = "favorites" | "database";
 
 export interface ArticleQuizQuestion {
+  id: string;
+  favoriteId?: string;
   word: string;
   article: DefiniteArticle;
   meaning: string;
   reason: string;
   level: CefrLevel | null;
+  reviewDue: boolean;
 }
 
 export function articleReasonText(reason: string | null | undefined, article: Article) {
@@ -37,6 +41,7 @@ export function buildArticleQuizQuestions({
   vocabulary,
   limit = 8,
   random = Math.random,
+  now = Date.now(),
 }: {
   mode: ArticleQuizMode;
   level: CefrLevel;
@@ -44,29 +49,56 @@ export function buildArticleQuizQuestions({
   vocabulary: VocabularyIndexEntry[];
   limit?: number;
   random?: () => number;
+  now?: number;
 }) {
-  const questions: ArticleQuizQuestion[] = mode === "favorites"
-    ? favorites.flatMap((item): ArticleQuizQuestion[] => item.article ? [{
-        word: item.word,
-        article: item.article,
-        meaning: item.meaning,
-        reason: articleReasonText(item.articleReason, item.article) ?? "-",
-        level: item.level ?? null,
-      }] : [])
-    : vocabulary.flatMap((item): ArticleQuizQuestion[] => item.article && item.level === level ? [{
-        word: item.word,
-        article: item.article,
-        meaning: item.meaning,
-        reason: articleReasonText(item.articleReason, item.article) ?? "-",
-        level: item.level,
-      }] : []);
+  const inSelectedLevel = (item: FavoriteWord) => mode === "favorites" || item.level === level;
+  const fromFavorite = (item: FavoriteWord, reviewDue: boolean): ArticleQuizQuestion => ({
+    id: item.id,
+    favoriteId: item.id,
+    word: item.word,
+    article: item.article!,
+    meaning: item.meaning,
+    reason: articleReasonText(item.articleReason, item.article) ?? "-",
+    level: item.level ?? null,
+    reviewDue,
+  });
+  const due = favorites.filter((item) => (
+    Boolean(item.article) && inSelectedLevel(item) && isReviewDue(item, now)
+  )).map((item) => fromFavorite(item, true));
+  const active = favorites.filter((item) => (
+    Boolean(item.article)
+    && inSelectedLevel(item)
+    && !item.mastery
+    && getStoredFavoriteTypes(item).includes("article")
+  )).map((item) => fromFavorite(item, false));
+
+  const savedIds = new Set(favorites.map((item) => item.id));
+  const database = mode === "database" ? vocabulary.flatMap((item): ArticleQuizQuestion[] => {
+    if (!item.article || item.level !== level) return [];
+    const id = createWordId(item.word, item.partOfSpeech);
+    if (savedIds.has(id)) return [];
+    return [{
+      id,
+      word: item.word,
+      article: item.article,
+      meaning: item.meaning,
+      reason: articleReasonText(item.articleReason, item.article) ?? "-",
+      level: item.level,
+      reviewDue: false,
+    }];
+  }) : [];
+
+  const questions = [
+    ...shuffleItems(due, random),
+    ...shuffleItems(active, random),
+    ...shuffleItems(database, random),
+  ];
 
   const unique = new Map<string, ArticleQuizQuestion>();
   for (const question of questions) {
-    const key = question.word.trim().toLocaleLowerCase("de-DE");
-    if (!unique.has(key)) unique.set(key, question);
+    if (!unique.has(question.id)) unique.set(question.id, question);
   }
-  return shuffleItems(Array.from(unique.values()), random).slice(0, limit);
+  return Array.from(unique.values()).slice(0, limit);
 }
 
 export function isCorrectArticleAnswer(question: ArticleQuizQuestion, answer: DefiniteArticle) {

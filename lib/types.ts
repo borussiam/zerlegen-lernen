@@ -6,6 +6,23 @@ export type MorphemeKind = "prefix" | "root" | "suffix" | "compound";
 
 export type FavoriteType = "meaning" | "article";
 
+export type ReviewStep = 0 | 1 | 2 | 3;
+
+export interface MasteryProgress {
+  masteredAt: number;
+  reviewStep: ReviewStep;
+  nextReviewAt: number;
+  lastReviewedAt?: number;
+  lastMeaningKnown?: boolean;
+  lastArticleKnown?: boolean | null;
+  previousFavoriteTypes: FavoriteType[];
+}
+
+export interface PracticeProgress {
+  articleCorrectStreak: number;
+  lastArticleAnsweredAt?: number;
+}
+
 export interface Morpheme {
   text: string;
   lookup: string;
@@ -40,6 +57,7 @@ export interface ParseResult {
 }
 
 export interface FavoriteWord {
+  id: string;
   word: string;
   article: Article;
   meaning: string;
@@ -50,6 +68,13 @@ export interface FavoriteWord {
   favoriteTypes?: FavoriteType[];
   level?: CefrLevel | null;
   addedAt?: number;
+  mastery?: MasteryProgress;
+  practice?: PracticeProgress;
+}
+
+export interface WordbookState {
+  version: 2;
+  words: FavoriteWord[];
 }
 
 export interface VocabularyIndexEntry {

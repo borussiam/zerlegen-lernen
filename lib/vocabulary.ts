@@ -1,7 +1,9 @@
 import type { CefrLevel, FavoriteType, FavoriteWord, ParseResult, VocabularyIndexEntry } from "./types";
+import { createWordId, getStoredFavoriteTypes } from "./spaced-repetition";
 
 export type FavoriteFilter = "all" | FavoriteType;
-export type FavoriteSort = "recent" | "alphabetical";
+export type FavoriteSort = "recent" | "alphabetical" | "review";
+export type MasteryScope = "active" | "include" | "mastered";
 export type RandomLevelRange = "A1-B2" | "A1-A2" | "B1-B2" | CefrLevel;
 
 const LEVEL_ORDER: Record<CefrLevel, number> = {
@@ -52,20 +54,23 @@ export function inferDifficultyLevel(
 export function vocabularyForRandom(
   vocabulary: VocabularyIndexEntry[],
   range: RandomLevelRange,
+  favorites: FavoriteWord[] = [],
 ) {
   const [minimum, maximum] = RANGE_BOUNDS[range];
   const minimumRank = LEVEL_ORDER[minimum];
   const maximumRank = LEVEL_ORDER[maximum];
+  const masteredIds = new Set(favorites.filter((word) => word.mastery).map((word) => word.id));
   return vocabulary.filter((entry) => (
     entry.level !== null
     && !isAffixWord(entry.word, entry.partOfSpeech)
+    && !masteredIds.has(createWordId(entry.word, entry.partOfSpeech))
     && LEVEL_ORDER[entry.level] >= minimumRank
     && LEVEL_ORDER[entry.level] <= maximumRank
   ));
 }
 
 export function getFavoriteTypes(item: FavoriteWord): FavoriteType[] {
-  return item.favoriteTypes?.length ? item.favoriteTypes : ["meaning"];
+  return getStoredFavoriteTypes(item);
 }
 
 export function matchVocabulary(
@@ -91,11 +96,21 @@ export function filterAndSortFavorites(
   favorites: FavoriteWord[],
   filter: FavoriteFilter,
   sort: FavoriteSort,
+  masteryScope: MasteryScope = "active",
 ) {
   return favorites
     .map((item, index) => ({ item, index }))
-    .filter(({ item }) => filter === "all" || getFavoriteTypes(item).includes(filter))
+    .filter(({ item }) => {
+      if (masteryScope === "active" && item.mastery) return false;
+      if (masteryScope === "mastered" && !item.mastery) return false;
+      return filter === "all" || getFavoriteTypes(item).includes(filter);
+    })
     .sort((left, right) => {
+      if (sort === "review") {
+        const leftReview = left.item.mastery?.nextReviewAt ?? Number.POSITIVE_INFINITY;
+        const rightReview = right.item.mastery?.nextReviewAt ?? Number.POSITIVE_INFINITY;
+        return leftReview - rightReview;
+      }
       if (sort === "alphabetical") {
         return left.item.word.localeCompare(right.item.word, "de", { sensitivity: "base" });
       }
