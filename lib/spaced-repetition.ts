@@ -1,4 +1,5 @@
 import type { FavoriteType, FavoriteWord, ReviewStep, WordbookState } from "./types";
+import { headwordKeyFor } from "./dictionary-entry";
 
 export const DAY_MS = 24 * 60 * 60 * 1_000;
 export const REVIEW_INTERVAL_DAYS = [1, 3, 7, 30] as const;
@@ -13,13 +14,12 @@ function uniqueFavoriteTypes(value: unknown): FavoriteType[] {
   return Array.from(new Set(value.filter((type): type is FavoriteType => type === "meaning" || type === "article")));
 }
 
-function normalizedPartOfSpeech(partOfSpeech: string | null | undefined) {
-  return partOfSpeech?.trim().toLocaleLowerCase("de-DE") || "unknown";
-}
-
 export function createWordId(word: string, partOfSpeech: string | null | undefined) {
   const spelling = word.trim().normalize("NFC");
-  return `${encodeURIComponent(spelling)}::${encodeURIComponent(normalizedPartOfSpeech(partOfSpeech))}`;
+  if (spelling.startsWith("-") || spelling.endsWith("-") || /^(?:prefix|suffix|affix)$/i.test(partOfSpeech ?? "")) {
+    return `${encodeURIComponent(spelling)}::${encodeURIComponent(partOfSpeech?.trim().toLocaleLowerCase("de-DE") || "unknown")}`;
+  }
+  return `headword::${encodeURIComponent(headwordKeyFor(spelling))}`;
 }
 
 export function isMastered(word: FavoriteWord) {
@@ -162,9 +162,29 @@ function migrateWord(
   return {
     ...word,
     id: createWordId(word.word, word.partOfSpeech),
+    headwordKey: word.headwordKey ?? headwordKeyFor(word.word),
     favoriteTypes: mastery ? [] : getStoredFavoriteTypes({ favoriteTypes: word.favoriteTypes }),
     addedAt: word.addedAt ?? fallbackAddedAt,
     mastery,
+  };
+}
+
+function mergeFavoriteWords(left: FavoriteWord, right: FavoriteWord): FavoriteWord {
+  const favoriteTypes = Array.from(new Set([...getStoredFavoriteTypes(left), ...getStoredFavoriteTypes(right)]));
+  const variants = [...(left.variants ?? []), ...(right.variants ?? [])];
+  const decompositionOptions = [...(left.decompositionOptions ?? []), ...(right.decompositionOptions ?? [])];
+  const nounSource = left.article ? left : right.article ? right : left;
+  return {
+    ...nounSource,
+    id: left.id,
+    word: nounSource.word,
+    meaning: [left.meaning, right.meaning].filter(Boolean).join(" / "),
+    favoriteTypes,
+    addedAt: Math.min(left.addedAt ?? Number.POSITIVE_INFINITY, right.addedAt ?? Number.POSITIVE_INFINITY),
+    mastery: left.mastery ?? right.mastery,
+    practice: left.practice ?? right.practice,
+    variants: variants.length ? variants : undefined,
+    decompositionOptions: decompositionOptions.length ? decompositionOptions : undefined,
   };
 }
 
@@ -176,8 +196,14 @@ export function migrateWordbookState(value: unknown, now: number): WordbookState
       ? (value as { words: unknown[] }).words
       : [];
   const valid = candidates.filter(isFavoriteWordLike);
+  const words = valid.map((word, index) => migrateWord(word, now - ((valid.length - index) * 1_000)));
+  const merged = new Map<string, FavoriteWord>();
+  for (const word of words) {
+    const existing = merged.get(word.id);
+    merged.set(word.id, existing ? mergeFavoriteWords(existing, word) : word);
+  }
   return {
     version: 2,
-    words: valid.map((word, index) => migrateWord(word, now - ((valid.length - index) * 1_000))),
+    words: Array.from(merged.values()),
   };
 }

@@ -64,8 +64,8 @@ describe("wordbook migration", () => {
     expect(state.words[0].favoriteTypes).toEqual([]);
   });
 
-  it("keeps case-sensitive spelling identities distinct", () => {
-    expect(createWordId("Recht", "Noun")).not.toBe(createWordId("recht", "Adjective"));
+  it("consolidates capitalization and POS variants under one headword identity", () => {
+    expect(createWordId("Recht", "Noun")).toBe(createWordId("recht", "Adjective"));
   });
 });
 

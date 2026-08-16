@@ -25,11 +25,14 @@ import {
 
 const STORAGE_KEY = "zerlegen-lernen:favorites";
 const HISTORY_KEY = "zerlegen-lernen:results";
+const THEME_KEY = "zerlegen-lernen:theme";
 const WORD_CACHE_KEY = "zerlegen-lernen:word-cache:v6";
 const WORD_CACHE_TTL_MS = 24 * 60 * 60 * 1_000;
 const WORD_CACHE_MAX_ENTRIES = 100;
 const CLIENT_REQUEST_DELAY_MS = 175;
 const AI_ENABLED = process.env.NEXT_PUBLIC_AI_ENABLED === "true";
+type ThemePreference = "system" | "light" | "dark";
+type ResolvedTheme = "light" | "dark";
 
 const articleStyle = {
   der: "bg-blue-100 text-blue-700 border-blue-200",
@@ -101,6 +104,10 @@ function favoriteFromResult(
     partOfSpeech: result.partOfSpeech,
     morphemes: result.morphemes,
     articleReason: result.articleReason,
+    headwordKey: result.headwordKey,
+    displayHeadword: result.displayHeadword,
+    variants: result.variants,
+    decompositionOptions: result.decompositionOptions,
     favoriteTypes: existing?.mastery ? [] : types,
     level: result.level ?? existing?.level ?? null,
     addedAt: existing?.addedAt ?? Date.now(),
@@ -125,6 +132,10 @@ function vocabularyEntryFromResult(result: ParseResult): VocabularyIndexEntry {
     level: result.level ?? null,
     meaning: result.meanings[0] ?? "",
     articleReason: result.articleReason,
+    headwordKey: result.headwordKey,
+    displayHeadword: result.displayHeadword,
+    variants: result.variants,
+    decompositionOptions: result.decompositionOptions,
   };
 }
 
@@ -151,6 +162,23 @@ function MasteryGlyph() {
     <svg aria-hidden viewBox="0 0 24 24" className="h-5 w-5 fill-none stroke-current stroke-[2.4]">
       <circle cx="12" cy="12" r="9" />
       <path strokeLinecap="round" strokeLinejoin="round" d="m8 12.2 2.5 2.5L16.5 9" />
+    </svg>
+  );
+}
+
+function SunIcon() {
+  return (
+    <svg aria-hidden viewBox="0 0 24 24" className="h-5 w-5 fill-none stroke-current stroke-[2.2]">
+      <circle cx="12" cy="12" r="4" />
+      <path strokeLinecap="round" d="M12 2.5v2M12 19.5v2M4.5 4.5l1.4 1.4M18.1 18.1l1.4 1.4M2.5 12h2M19.5 12h2M4.5 19.5l1.4-1.4M18.1 5.9l1.4-1.4" />
+    </svg>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <svg aria-hidden viewBox="0 0 24 24" className="h-5 w-5 fill-none stroke-current stroke-[2.2]">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M20.2 14.6A8.5 8.5 0 0 1 9.4 3.8a8.5 8.5 0 1 0 10.8 10.8Z" />
     </svg>
   );
 }
@@ -442,6 +470,9 @@ export function WordWorkbench() {
   const [results, setResults] = useState<ParseResult[]>([]);
   const [favorites, setFavorites] = useState<FavoriteWord[]>([]);
   const [vocabulary, setVocabulary] = useState<VocabularyIndexEntry[]>([]);
+  const [themePreference, setThemePreference] = useState<ThemePreference>("system");
+  const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>("light");
+  const [toast, setToast] = useState<{ id: number; message: string; visible: boolean } | null>(null);
   const [autocompleteOpen, setAutocompleteOpen] = useState(false);
   const [autocompleteIndex, setAutocompleteIndex] = useState(-1);
   const [favoriteFilter, setFavoriteFilter] = useState<FavoriteFilter>("all");
@@ -481,6 +512,59 @@ export function WordWorkbench() {
   const [reviewArticleKnown, setReviewArticleKnown] = useState<boolean | null>(null);
   const [reviewStats, setReviewStats] = useState<ReviewStats>({ reviewed: 0, success: 0, reset: 0, wordIds: [] });
   const searchFormRef = useRef<HTMLFormElement>(null);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(THEME_KEY);
+      if (saved === "system" || saved === "light" || saved === "dark") {
+        setThemePreference(saved);
+      }
+    } catch {
+      // Theme falls back to system when storage is unavailable.
+    }
+  }, []);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyTheme = () => {
+      const resolved = themePreference === "system" ? (media.matches ? "dark" : "light") : themePreference;
+      document.documentElement.dataset.theme = resolved;
+      document.documentElement.style.colorScheme = resolved;
+      setResolvedTheme(resolved);
+    };
+
+    applyTheme();
+    try {
+      localStorage.setItem(THEME_KEY, themePreference);
+    } catch {
+      // The current in-memory theme still applies if storage is unavailable.
+    }
+
+    media.addEventListener("change", applyTheme);
+    return () => media.removeEventListener("change", applyTheme);
+  }, [themePreference]);
+
+  useEffect(() => {
+    if (!error) return;
+    setToast({ id: Date.now(), message: error, visible: true });
+  }, [error]);
+
+  const toastId = toast?.id;
+
+  useEffect(() => {
+    if (!toastId) return;
+    const id = toastId;
+    const fadeTimer = window.setTimeout(() => {
+      setToast((current) => current?.id === id ? { ...current, visible: false } : current);
+    }, 4200);
+    const clearTimer = window.setTimeout(() => {
+      setToast((current) => current?.id === id ? null : current);
+    }, 4800);
+    return () => {
+      window.clearTimeout(fadeTimer);
+      window.clearTimeout(clearTimer);
+    };
+  }, [toastId]);
 
   const autocompleteMatches = useMemo(
     () => matchVocabulary(vocabulary, query),
@@ -986,6 +1070,12 @@ export function WordWorkbench() {
   }
 
   async function generateExercises() {
+    if (!AI_ENABLED) {
+      const message = "AI 예문 생성은 현재 비활성화되어 있습니다.";
+      setError(message);
+      setToast({ id: Date.now(), message, visible: true });
+      return;
+    }
     setQuizLoading(true);
     setError("");
     try {
@@ -1062,22 +1152,29 @@ export function WordWorkbench() {
 
   return (
     <main className="min-h-screen px-5 py-6 sm:px-8 lg:px-12">
-      <nav className="mx-auto flex max-w-6xl items-center border-b border-ink/15 pb-5">
+      <nav className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 border-b border-ink/15 pb-5">
         <div className="flex items-center gap-3">
-          <span className="grid h-10 w-10 place-items-center rounded-full bg-ink text-lg text-paper">ZL</span>
+          <span className="grid h-10 w-10 place-items-center border border-ink bg-ink text-lg font-black text-paper">ZL</span>
           <div>
             <p className="font-serif text-xl font-bold leading-none">zerlegen lernen</p>
             <p className="mt-1 text-[10px] uppercase tracking-[0.24em] text-ink/50">Deutsch, Stück für Stück</p>
           </div>
         </div>
+        <button
+          type="button"
+          aria-label={resolvedTheme === "dark" ? "라이트 모드로 전환" : "다크 모드로 전환"}
+          title={resolvedTheme === "dark" ? "라이트 모드" : "다크 모드"}
+          onClick={() => setThemePreference(resolvedTheme === "dark" ? "light" : "dark")}
+          className="grid h-11 w-11 place-items-center border border-ink/20 bg-white text-ink transition hover:border-moss hover:text-moss"
+        >
+          {resolvedTheme === "dark" ? <SunIcon /> : <MoonIcon />}
+        </button>
       </nav>
 
       <div role="tablist" aria-label="학습 화면" className="mx-auto mt-6 flex max-w-6xl gap-2 rounded-[1.4rem] border border-ink/15 bg-white/70 p-2 shadow-sm">
         <button type="button" role="tab" aria-selected={activeTab === "explore"} onClick={() => setActiveTab("explore")} className={`flex-1 rounded-2xl border px-5 py-3.5 text-base font-bold transition ${activeTab === "explore" ? "border-ink bg-ink text-white shadow-md" : "border-transparent text-ink/65 hover:border-ink/10 hover:bg-white"}`}>탐색</button>
         <button type="button" role="tab" aria-selected={activeTab === "favorites"} onClick={() => setActiveTab("favorites")} className={`flex-1 rounded-2xl border px-5 py-3.5 text-base font-bold transition ${activeTab === "favorites" ? "border-ink bg-ink text-white shadow-md" : "border-transparent text-ink/65 hover:border-ink/10 hover:bg-white"}`}>단어장</button>
       </div>
-
-      {error && <div role="alert" className="mx-auto mt-6 max-w-6xl rounded-2xl border border-coral/30 bg-red-50 p-4 text-sm text-red-800">{error}</div>}
 
       {activeTab === "explore" && (
         <>
@@ -1181,16 +1278,25 @@ export function WordWorkbench() {
                   const detailKey = `${resultIndex}:${result.word}`;
                   const selectedLookups = expandedMorphemes[detailKey] ?? [];
                   const selectedParts = result.morphemes.filter((part) => selectedLookups.includes(part.lookup));
+                  const variants = result.variants?.length ? result.variants : null;
+                  const decompositionOptions = result.decompositionOptions?.length ? result.decompositionOptions : null;
+                  const articleRule = articleReasonText(result.articleReason, result.article);
+                  const displayHeadword = result.displayHeadword ?? result.word;
+                  const combinedTitle = Boolean(result.displayHeadword && result.displayHeadword !== result.word);
                   return (
                     <section key={`${result.word}-${resultIndex}`} className={`rounded-[2rem] border bg-white/90 p-6 shadow-card transition sm:p-9 ${current ? "border-moss/30" : "border-ink/10"}`}>
                       <div className="flex flex-wrap items-start justify-between gap-5">
-                        <div>
+                        <div className="min-w-0">
                           <div className="flex items-center gap-3 sm:gap-4">
-                            {result.article && <span className={`rounded-2xl border px-4 py-1.5 font-serif text-xl font-bold leading-none shadow-sm sm:text-2xl ${articleStyle[result.article]}`}>{result.article}</span>}
-                            <h2 className="font-serif text-4xl font-bold sm:text-5xl">{result.word}</h2>
+                            {result.article && !combinedTitle && <span className={`rounded-2xl border px-4 py-1.5 font-serif text-xl font-bold leading-none shadow-sm sm:text-2xl ${articleStyle[result.article]}`}>{result.article}</span>}
+                            <h2 className="min-w-0 break-words font-serif text-4xl font-bold [overflow-wrap:anywhere] sm:text-5xl">{displayHeadword}</h2>
                           </div>
                           <div className="mt-3 flex flex-wrap items-center gap-2">
-                            {result.partOfSpeech && <p className="text-xs uppercase tracking-widest text-ink/45">{result.partOfSpeech}</p>}
+                            {variants ? variants.map((variant) => (
+                              <span key={`${variant.word}-${variant.partOfSpeech ?? "word"}`} className="border border-ink/15 bg-paper px-2 py-1 text-[10px] font-black uppercase tracking-wider text-ink/55">
+                                {variant.partOfSpeech ?? "word"}
+                              </span>
+                            )) : result.partOfSpeech && <p className="text-xs uppercase tracking-widest text-ink/45">{result.partOfSpeech}</p>}
                             <LevelBadge level={result.level} />
                           </div>
                         </div>
@@ -1206,11 +1312,10 @@ export function WordWorkbench() {
                           <div key={`${part.text}-${index}`} className="flex items-center gap-2">
                             {index > 0 && <span className="text-2xl text-ink/25">+</span>}
                             {terminal ? (
-                              <span title={part.meaning} className="rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-3 text-xl font-bold text-emerald-800">{part.text}</span>
+                              <span className="rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-3 text-xl font-bold text-emerald-800">{part.text}</span>
                             ) : (
-                              <button type="button" aria-pressed={selectedLookups.includes(part.lookup)} onClick={() => toggleMorpheme(resultIndex, result.word, part.lookup)} title={`${part.meaning}\n눌러서 상세 정보 열기/닫기`} className={`group relative rounded-2xl border px-5 py-3 text-xl font-bold transition hover:-translate-y-1 ${selectedLookups.includes(part.lookup) ? "border-moss bg-moss text-white shadow-md" : "border-moss/20 bg-moss/5 text-moss hover:bg-moss hover:text-white"}`}>
+                              <button type="button" aria-pressed={selectedLookups.includes(part.lookup)} onClick={() => toggleMorpheme(resultIndex, result.word, part.lookup)} aria-label={`${part.text} 상세 정보 열기/닫기`} className={`group relative rounded-2xl border px-5 py-3 text-xl font-bold transition hover:-translate-y-1 ${selectedLookups.includes(part.lookup) ? "border-moss bg-moss text-white shadow-md" : "border-moss/20 bg-moss/5 text-moss hover:bg-moss hover:text-white"}`}>
                                 {part.text}
-                                <span className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-3 hidden w-64 -translate-x-1/2 rounded-xl bg-ink p-3 text-left text-xs font-normal leading-5 text-white shadow-xl group-hover:block">{part.meaning}</span>
                               </button>
                             )}
                           </div>
@@ -1220,11 +1325,39 @@ export function WordWorkbench() {
                         <a href={result.sourceUrl} target="_blank" rel="noreferrer" className="font-bold underline decoration-moss/30 underline-offset-4">Wiktionary 원문 ↗</a>
                       </div>
 
-                      {result.article && <p className="mt-6 rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm leading-6 text-blue-950"><strong>왜 {result.article}일까요?</strong> {articleReasonText(result.articleReason, result.article) ?? "-"}</p>}
+                      {articleRule && result.article && <p className="mt-6 rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm leading-6 text-blue-950"><strong>왜 {result.article}일까요?</strong> {articleRule}</p>}
 
                       <div className="mt-7 border-t border-ink/10 pt-7">
                         <h3 className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-coral">Bedeutung · 뜻</h3>
-                        <ol className="space-y-2 text-sm leading-6 text-ink/75">{result.meanings.map((meaning, index) => <li key={`${meaning}-${index}`}><span className="mr-2 text-ink/35">{index + 1}.</span>{meaning}</li>)}</ol>
+                        {variants && variants.length > 1 ? (
+                          <div className="grid gap-3">
+                            {variants.map((variant) => {
+                              const option = decompositionOptions?.find((candidate) => candidate.word === variant.word && candidate.partOfSpeech === variant.partOfSpeech);
+                              return (
+                                <article key={`${variant.word}-${variant.partOfSpeech ?? "word"}`} className="border border-ink/10 bg-paper/65 p-4">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    {variant.article && <span className={`border px-2 py-1 font-serif text-sm font-bold ${articleStyle[variant.article]}`}>{variant.article}</span>}
+                                    <h4 className="font-serif text-xl font-bold">{variant.word}</h4>
+                                    {variant.partOfSpeech && <span className="text-[10px] font-black uppercase tracking-wider text-ink/45">{variant.partOfSpeech}</span>}
+                                  </div>
+                                  <ol className="mt-3 space-y-2 text-sm leading-6 text-ink/75">{variant.meanings.map((meaning, index) => <li key={`${meaning}-${index}`}><span className="mr-2 text-ink/35">{index + 1}.</span>{meaning}</li>)}</ol>
+                                  {option && (
+                                    <div className="mt-4 flex flex-wrap items-center gap-1.5 text-sm font-bold text-moss">
+                                      {option.morphemes.map((part, partIndex) => (
+                                        <span key={`${option.id}-${part.lookup}-${partIndex}`} className="flex items-center gap-1.5">
+                                          {partIndex > 0 && <span className="text-ink/25">+</span>}
+                                          <span className="border border-moss/20 bg-moss/5 px-2 py-1">{part.text}</span>
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
+                                </article>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <ol className="space-y-2 text-sm leading-6 text-ink/75">{result.meanings.map((meaning, index) => <li key={`${meaning}-${index}`}><span className="mr-2 text-ink/35">{index + 1}.</span>{meaning}</li>)}</ol>
+                        )}
                       </div>
 
                       <div className="mt-7 rounded-2xl border border-coral/15 bg-coral/5 p-5">
@@ -1331,7 +1464,7 @@ export function WordWorkbench() {
                             {item.article ? <span className={`inline-flex min-w-12 justify-center rounded-xl border px-3 py-1.5 font-serif text-base font-bold ${articleStyle[item.article]}`}>{item.article}</span> : <span className="pl-3 text-ink/30">—</span>}
                           </td>
                           <td className="px-4 py-5">
-                            <button type="button" onClick={() => openFavorite(item.word)} className="whitespace-nowrap font-serif text-lg font-bold underline decoration-moss/25 underline-offset-4 transition hover:text-moss">{item.word} →</button>
+                            <button type="button" onClick={() => openFavorite(item.word)} className="whitespace-nowrap font-serif text-lg font-bold underline decoration-moss/25 underline-offset-4 transition hover:text-moss">{item.displayHeadword ?? item.word} →</button>
                             {item.mastery && (isReviewDue(item, now)
                               ? <span className="mt-2 block w-fit rounded-full bg-amber-100 px-2 py-1 text-[10px] font-black text-amber-900">복습 오늘</span>
                               : <span className="mt-2 block text-[10px] font-bold text-teal-900/55">다음 복습 {formatReviewDate(item.mastery.nextReviewAt)}</span>)}
@@ -1357,7 +1490,7 @@ export function WordWorkbench() {
                               </div>
                             ) : <span className="text-ink/35">—</span>}
                           </td>
-                          <td className="max-w-xs px-5 py-5 text-xs leading-5 text-ink/55 lg:pr-12">{articleReasonText(item.articleReason, item.article) ?? "-"}</td>
+                          <td className="max-w-xs px-5 py-5 text-xs leading-5 text-ink/55 lg:pr-12">{articleReasonText(item.articleReason, item.article) ?? ""}</td>
                         </tr>
                       );
                     })}
@@ -1402,9 +1535,8 @@ export function WordWorkbench() {
               </div>
               <div className="mt-5 flex gap-2">
                 <select suppressHydrationWarning id="level" name="level" aria-label="퀴즈 난이도" value={level} onChange={(event) => setLevel(event.target.value as CefrLevel)} className="rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-white outline-none">{(["A1", "A2", "B1", "B2"] as CefrLevel[]).map((item) => <option className="text-ink" key={item} value={item}>{item}</option>)}</select>
-                <button type="button" disabled={!AI_ENABLED || !clozeWords.length || quizLoading} onClick={() => void generateExercises()} className="flex-1 rounded-xl bg-coral px-4 py-2 text-sm font-bold hover:bg-[#c95e52] disabled:cursor-not-allowed disabled:opacity-40">{quizLoading ? "문장 만드는 중…" : AI_ENABLED ? "AI 퀴즈 만들기" : "AI 퀴즈 비활성화"}</button>
+                <button type="button" disabled={!clozeWords.length || quizLoading} onClick={() => void generateExercises()} className="flex-1 rounded-xl bg-coral px-4 py-2 text-sm font-bold hover:bg-[#c95e52] disabled:cursor-not-allowed disabled:opacity-40">{quizLoading ? "문장 만드는 중…" : AI_ENABLED ? "AI 퀴즈 만들기" : "AI 퀴즈 비활성화"}</button>
               </div>
-              {!AI_ENABLED && <p className="mt-3 text-center text-xs leading-5 text-white/45">AI 예문 생성은 현재 비활성화되어 있습니다.</p>}
               {exercises.length ? <ol className="mt-6 space-y-5">{exercises.map((item, index) => (
                 <li key={`${item.answer}-${index}`} className="border-b border-white/10 pb-5 last:border-0">
                   <p className="font-serif text-lg font-semibold">{index + 1}. {showAnswers ? item.sentence : item.cloze}</p>
@@ -1509,16 +1641,16 @@ export function WordWorkbench() {
                 </div>
                 <div className="h-2 overflow-hidden rounded-full bg-ink/10"><div style={{ width: `${((articleQuestionIndex + 1) / articleQuestions.length) * 100}%` }} className="h-full rounded-full bg-blue-700 transition-all" /></div>
 
-                <section className="mt-6 rounded-[2rem] border border-ink/10 bg-white p-6 shadow-card sm:p-10">
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
+                <section className="mt-6 max-w-full overflow-hidden rounded-[2rem] border border-ink/10 bg-white p-6 shadow-card sm:p-10">
+                  <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-4">
+                    <div className="min-w-0">
                       <p className="text-xs font-bold uppercase tracking-[0.2em] text-ink/35">Welcher Artikel?</p>
-                      <div className="mt-3 flex flex-wrap items-end gap-3">
-                        <h2 className="font-serif text-5xl font-bold sm:text-7xl">{articleQuestion.word}</h2>
+                      <div className="mt-3 flex min-w-0 flex-wrap items-end gap-3">
+                        <h2 className="min-w-0 max-w-full break-words font-serif text-4xl font-bold leading-tight [overflow-wrap:anywhere] sm:text-6xl">{articleQuestion.word}</h2>
                         <LevelBadge level={articleQuestion.level} />
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex shrink-0 items-center gap-2">
                       <FavoriteToggle compact type="meaning" active={hasFavoriteType(articleQuestion.word, "meaning", undefined, articleQuestion.favoriteId)} disabled={favoriteRequestKey === `${articleQuestion.favoriteId ?? articleQuestion.word}:meaning`} onClick={() => void toggleFavoriteByWord(articleQuestion.word, "meaning", articleQuestion.favoriteId)} />
                       <FavoriteToggle compact type="article" active={hasFavoriteType(articleQuestion.word, "article", undefined, articleQuestion.favoriteId)} disabled={favoriteRequestKey === `${articleQuestion.favoriteId ?? articleQuestion.word}:article`} onClick={() => void toggleFavoriteByWord(articleQuestion.word, "article", articleQuestion.favoriteId)} />
                     </div>
@@ -1539,7 +1671,7 @@ export function WordWorkbench() {
                   {articleAnswer && (
                     <div role="status" className="mt-6 rounded-2xl border border-blue-200 bg-blue-50 p-5 text-sm leading-6 text-blue-950">
                       <p className="text-base font-bold">{articleAnswer === articleQuestion.article ? "정답입니다!" : `정답은 ${articleQuestion.article}입니다.`}</p>
-                      <p className="mt-2 text-blue-950/70">{articleQuestion.reason}</p>
+                      {articleQuestion.reason && <p className="mt-2 text-blue-950/70">{articleQuestion.reason}</p>}
                       {articleQuestion.reviewDue && (
                         <div className="mt-5 rounded-2xl border border-teal-900/15 bg-white p-4 text-ink">
                           <p className="text-sm leading-6"><strong>뜻:</strong> {articleQuestion.meaning}</p>
@@ -1583,6 +1715,26 @@ export function WordWorkbench() {
               </>
             )}
         </aside>
+      )}
+
+      {toast && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-5 z-[100] flex justify-center px-4 sm:bottom-7 sm:justify-end sm:px-8">
+          <div
+            role="alert"
+            className={`pointer-events-auto max-w-md border border-coral/35 bg-white px-4 py-3 text-sm font-bold leading-6 text-ink shadow-card transition duration-300 ${toast.visible ? "translate-y-0 opacity-100" : "translate-y-3 opacity-0"}`}
+          >
+            <div className="flex items-start gap-3">
+              <span className="mt-1 h-2.5 w-2.5 shrink-0 bg-coral" aria-hidden />
+              <p className="min-w-0 flex-1">{toast.message}</p>
+              <button
+                type="button"
+                onClick={() => setToast(null)}
+                aria-label="알림 닫기"
+                className="-mr-1 grid h-7 w-7 shrink-0 place-items-center border border-ink/15 text-lg leading-none text-ink/55 transition hover:text-ink"
+              >×</button>
+            </div>
+          </div>
+        </div>
       )}
     </main>
   );

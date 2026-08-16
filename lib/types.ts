@@ -54,6 +54,10 @@ export interface ParseResult {
   compoundHint: string | null;
   articleReason: string | null;
   level?: CefrLevel | null;
+  headwordKey?: string;
+  displayHeadword?: string;
+  variants?: DictionaryVariant[];
+  decompositionOptions?: DecompositionOption[];
 }
 
 export interface FavoriteWord {
@@ -70,6 +74,10 @@ export interface FavoriteWord {
   addedAt?: number;
   mastery?: MasteryProgress;
   practice?: PracticeProgress;
+  headwordKey?: string;
+  displayHeadword?: string;
+  variants?: DictionaryVariant[];
+  decompositionOptions?: DecompositionOption[];
 }
 
 export interface WordbookState {
@@ -84,6 +92,10 @@ export interface VocabularyIndexEntry {
   level: CefrLevel | null;
   meaning: string;
   articleReason: string | null;
+  headwordKey?: string;
+  displayHeadword?: string;
+  variants?: DictionaryVariant[];
+  decompositionOptions?: DecompositionOption[];
 }
 
 export interface GeneratedExercise {
@@ -92,4 +104,28 @@ export interface GeneratedExercise {
   answer: string;
   cloze: string;
   level: string;
+}
+
+export interface DictionaryVariant {
+  word: string;
+  article: Article;
+  partOfSpeech: string | null;
+  meanings: string[];
+  examples: WordExample[];
+  etymology: string | null;
+  morphemes: Morpheme[];
+  articleReason: string | null;
+  level?: CefrLevel | null;
+  sourceUrl: string;
+}
+
+export interface DecompositionOption {
+  id: string;
+  label: string;
+  word: string;
+  article: Article;
+  partOfSpeech: string | null;
+  meanings: string[];
+  etymology: string | null;
+  morphemes: Morpheme[];
 }

@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { headwordKeyFor, mergeParseResults } from "./dictionary-entry";
 import { getGermanCaseCandidates } from "./german-word";
 import { getRuntimeVocabularyStore, isStoredParseResult } from "./runtime-vocabulary-store";
 import type { CefrLevel, ParseResult, VocabularyIndexEntry } from "./types";
@@ -12,6 +13,7 @@ interface PreParsedDataset {
 interface LoadedVocabulary {
   index: Map<string, ParseResult>;
   vocabulary: Map<string, VocabularyIndexEntry>;
+  headwords: Map<string, ParseResult[]>;
   baseKeys: Set<string>;
   runtimeKeys: Set<string>;
 }
@@ -30,6 +32,7 @@ function isDataset(value: unknown): value is PreParsedDataset {
 async function loadVocabulary(): Promise<LoadedVocabulary> {
   const index = new Map<string, ParseResult>();
   const vocabulary = new Map<string, VocabularyIndexEntry>();
+  const headwords = new Map<string, ParseResult[]>();
   const baseKeys = new Set<string>();
   const runtimeKeys = new Set<string>();
 
@@ -39,17 +42,12 @@ async function loadVocabulary(): Promise<LoadedVocabulary> {
       : sourceResult.level ?? null;
     const result = sourceResult.level === level ? sourceResult : { ...sourceResult, level };
     const key = result.word.normalize("NFC");
+    const headwordKey = headwordKeyFor(result.word);
     index.set(key, result);
+    headwords.set(headwordKey, [...(headwords.get(headwordKey) ?? []), result]);
     if (source === "base") baseKeys.add(key);
     else runtimeKeys.add(key);
-    vocabulary.set(key, {
-      word: result.word,
-      article: result.article,
-      partOfSpeech: result.partOfSpeech,
-      level,
-      meaning: result.meanings[0] ?? "",
-      articleReason: result.articleReason,
-    });
+    vocabulary.set(headwordKey, vocabularyEntry(mergeParseResults(headwords.get(headwordKey) ?? [result])));
   }
 
   try {
@@ -70,20 +68,21 @@ async function loadVocabulary(): Promise<LoadedVocabulary> {
     const missing = error instanceof Error && "code" in error && error.code === "ENOENT";
     if (!missing) throw error;
   }
-  return { index, vocabulary, baseKeys, runtimeKeys };
+  return { index, vocabulary, headwords, baseKeys, runtimeKeys };
 }
 
-function findResultWithKey(index: Map<string, ParseResult>, input: string) {
+function findResultsWithKeys(index: Map<string, ParseResult>, input: string) {
   const normalized = input.trim().normalize("NFC");
+  const matches: Array<{ key: string; result: ParseResult }> = [];
   for (const candidate of getGermanCaseCandidates(normalized)) {
     const result = index.get(candidate);
-    if (result) return { key: candidate, result };
+    if (result) matches.push({ key: candidate, result });
   }
-  return null;
+  return matches;
 }
 
 function findResult(index: Map<string, ParseResult>, input: string) {
-  return findResultWithKey(index, input)?.result ?? null;
+  return findResultsWithKeys(index, input)[0]?.result ?? null;
 }
 
 function vocabularyEntry(result: ParseResult): VocabularyIndexEntry {
@@ -94,6 +93,10 @@ function vocabularyEntry(result: ParseResult): VocabularyIndexEntry {
     level: result.level ?? null,
     meaning: result.meanings[0] ?? "",
     articleReason: result.articleReason,
+    headwordKey: result.headwordKey,
+    displayHeadword: result.displayHeadword,
+    variants: result.variants,
+    decompositionOptions: result.decompositionOptions,
   };
 }
 
@@ -116,18 +119,20 @@ function addRuntimeResult(loaded: LoadedVocabulary, result: ParseResult) {
   const key = result.word.normalize("NFC");
   if (loaded.baseKeys.has(key)) return;
   loaded.index.set(key, result);
-  loaded.vocabulary.set(key, vocabularyEntry(result));
+  const headwordKey = headwordKeyFor(result.word);
+  loaded.headwords.set(headwordKey, [...(loaded.headwords.get(headwordKey) ?? []), result]);
+  loaded.vocabulary.set(headwordKey, vocabularyEntry(mergeParseResults(loaded.headwords.get(headwordKey) ?? [result])));
   loaded.runtimeKeys.add(key);
 }
 
 export async function getStoredWord(input: string) {
   vocabularyPromise ??= loadVocabulary();
   const loaded = await vocabularyPromise;
-  const local = findResultWithKey(loaded.index, input);
-  if (local) {
+  const local = findResultsWithKeys(loaded.index, input);
+  if (local.length) {
     return {
-      result: local.result,
-      source: loaded.baseKeys.has(local.key) ? "pre-parsed" as const : "database" as const,
+      result: mergeParseResults(local.map((item) => item.result)),
+      source: local.some((item) => loaded.baseKeys.has(item.key)) ? "pre-parsed" as const : "database" as const,
     };
   }
 
@@ -137,7 +142,7 @@ export async function getStoredWord(input: string) {
     const result = await store.find(input);
     if (!result) return null;
     addRuntimeResult(loaded, result);
-    return { result, source: "database" as const };
+    return { result: mergeParseResults(loaded.headwords.get(headwordKeyFor(result.word)) ?? [result]), source: "database" as const };
   } catch (error) {
     console.warn("Neon에서 런타임 단어를 조회하지 못했습니다.", error);
     return null;
@@ -163,7 +168,7 @@ export async function registerParsedWord(parsed: ParseResult) {
   vocabularyPromise ??= loadVocabulary();
   const loaded = await vocabularyPromise;
   const existing = findResult(loaded.index, parsed.word);
-  if (existing) return { result: existing, stored: true };
+  if (existing) return { result: mergeParseResults(loaded.headwords.get(headwordKeyFor(existing.word)) ?? [existing]), stored: true };
 
   const knownComponentLevels = parsed.morphemes.flatMap((part): CefrLevel[] => {
     const component = findResult(loaded.index, part.lookup);
@@ -174,15 +179,16 @@ export async function registerParsedWord(parsed: ParseResult) {
     level: inferDifficultyLevel(parsed, knownComponentLevels),
   };
   addRuntimeResult(loaded, result);
+  const mergedResult = mergeParseResults(loaded.headwords.get(headwordKeyFor(result.word)) ?? [result]);
 
   const store = getRuntimeVocabularyStore();
   if (store) {
     try {
       await store.upsert(result);
-      return { result, stored: true };
+      return { result: mergedResult, stored: true };
     } catch (error) {
       console.warn("Neon에 런타임 단어를 저장하지 못했습니다.", error);
-      return { result, stored: false };
+      return { result: mergedResult, stored: false };
     }
   }
 
@@ -198,5 +204,5 @@ export async function registerParsedWord(parsed: ParseResult) {
     console.warn("런타임 단어 데이터를 파일에 저장하지 못했습니다.", error);
   });
   await persistenceQueue;
-  return { result, stored };
+  return { result: mergedResult, stored };
 }

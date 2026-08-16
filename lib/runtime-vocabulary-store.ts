@@ -1,4 +1,5 @@
 import { neon } from "@neondatabase/serverless";
+import { headwordKeyFor } from "./dictionary-entry";
 import { getGermanCaseCandidates } from "./german-word";
 import type { CefrLevel, ParseResult } from "./types";
 
@@ -52,9 +53,10 @@ export function createRuntimeVocabularyStore(query: RuntimeVocabularyQuery) {
   return {
     async find(input: string) {
       const candidates = getGermanCaseCandidates(normalizeRuntimeWord(input));
+      const headwordKey = headwordKeyFor(input);
       const rows = await query(
-        "select result from runtime_words where normalized_word = any($1::text[]) limit 1",
-        [candidates],
+        "select result from runtime_words where normalized_word = any($1::text[]) or headword_key = $2 order by updated_at desc",
+        [candidates, headwordKey],
       );
       return rows.length ? rowResult(rows[0]) : null;
     },
@@ -69,11 +71,23 @@ export function createRuntimeVocabularyStore(query: RuntimeVocabularyQuery) {
 
     async upsert(result: ParseResult) {
       await query(
-        `insert into runtime_words (normalized_word, word, result)
-         values ($1, $2, $3::jsonb)
+        `insert into runtime_words (normalized_word, word, result, headword_key, part_of_speech, article)
+         values ($1, $2, $3::jsonb, $4, $5, $6)
          on conflict (normalized_word) do update
-         set word = excluded.word, result = excluded.result, updated_at = now()`,
-        [normalizeRuntimeWord(result.word), result.word, JSON.stringify(result)],
+         set word = excluded.word,
+             result = excluded.result,
+             headword_key = excluded.headword_key,
+             part_of_speech = excluded.part_of_speech,
+             article = excluded.article,
+             updated_at = now()`,
+        [
+          normalizeRuntimeWord(result.word),
+          result.word,
+          JSON.stringify(result),
+          headwordKeyFor(result.word),
+          result.partOfSpeech,
+          result.article,
+        ],
       );
     },
   };

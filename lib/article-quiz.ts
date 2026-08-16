@@ -1,4 +1,5 @@
 import type { Article, CefrLevel, FavoriteWord, VocabularyIndexEntry } from "./types";
+import { articleForQuiz } from "./dictionary-entry";
 import { createWordId, getStoredFavoriteTypes, isReviewDue } from "./spaced-repetition";
 
 export type DefiniteArticle = Exclude<Article, null>;
@@ -10,7 +11,7 @@ export interface ArticleQuizQuestion {
   word: string;
   article: DefiniteArticle;
   meaning: string;
-  reason: string;
+  reason: string | null;
   level: CefrLevel | null;
   reviewDue: boolean;
 }
@@ -58,7 +59,7 @@ export function buildArticleQuizQuestions({
     word: item.word,
     article: item.article!,
     meaning: item.meaning,
-    reason: articleReasonText(item.articleReason, item.article) ?? "-",
+    reason: articleReasonText(item.articleReason, item.article),
     level: item.level ?? null,
     reviewDue,
   });
@@ -74,15 +75,25 @@ export function buildArticleQuizQuestions({
 
   const savedIds = new Set(favorites.map((item) => item.id));
   const database = mode === "database" ? vocabulary.flatMap((item): ArticleQuizQuestion[] => {
-    if (!item.article || item.level !== level) return [];
-    const id = createWordId(item.word, item.partOfSpeech);
+    const nounVariant = item.variants?.find((variant) => variant.article && /noun/i.test(variant.partOfSpeech ?? ""))
+      ?? (item.article && /noun/i.test(item.partOfSpeech ?? "") ? {
+        word: item.word,
+        article: item.article,
+        partOfSpeech: item.partOfSpeech,
+        meanings: [item.meaning],
+        articleReason: item.articleReason,
+        level: item.level,
+      } : null);
+    const article = nounVariant ? articleForQuiz({ article: nounVariant.article, variants: undefined }) : null;
+    if (!nounVariant || !article || item.level !== level) return [];
+    const id = createWordId(nounVariant.word, nounVariant.partOfSpeech);
     if (savedIds.has(id)) return [];
     return [{
       id,
-      word: item.word,
-      article: item.article,
-      meaning: item.meaning,
-      reason: articleReasonText(item.articleReason, item.article) ?? "-",
+      word: nounVariant.word,
+      article,
+      meaning: nounVariant.meanings[0] ?? item.meaning,
+      reason: articleReasonText(nounVariant.articleReason, article),
       level: item.level,
       reviewDue: false,
     }];

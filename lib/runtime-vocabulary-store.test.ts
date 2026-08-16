@@ -30,6 +30,7 @@ describe("runtime vocabulary store", () => {
 
     await expect(store.find("lampe")).resolves.toEqual(result);
     expect(calls[0]?.parameters?.[0]).toEqual(["lampe", "Lampe"]);
+    expect(calls[0]?.parameters?.[1]).toBe("lampe");
   });
 
   it("skips malformed rows when listing runtime words", async () => {
@@ -51,6 +52,6 @@ describe("runtime vocabulary store", () => {
 
     await store.upsert(result);
     expect(calls[0]?.statement).toContain("on conflict (normalized_word) do update");
-    expect(calls[0]?.parameters).toEqual(["Lampe", "Lampe", JSON.stringify(result)]);
+    expect(calls[0]?.parameters).toEqual(["Lampe", "Lampe", JSON.stringify(result), "lampe", "Noun", "die"]);
   });
 });
