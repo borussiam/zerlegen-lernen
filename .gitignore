@@ -19,6 +19,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+corpus_pipeline.log
+corpus_pipeline_error.log
 
 # testing
 /coverage
@@ -37,6 +39,12 @@ next-env.d.ts
 .cache/
 /data/runtime-vocabulary.json
 /data/runtime-vocabulary.json.tmp
+
+# generated corpus pipeline data
+/data/tatoeba/
+/data/corpus/
+__pycache__/
+*.py[cod]
 
 # deployment
 .vercel

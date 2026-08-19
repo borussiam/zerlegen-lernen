@@ -128,6 +128,19 @@ function addRuntimeResult(loaded: LoadedVocabulary, result: ParseResult) {
 export async function getStoredWord(input: string) {
   vocabularyPromise ??= loadVocabulary();
   const loaded = await vocabularyPromise;
+  const store = getRuntimeVocabularyStore();
+  if (store) {
+    try {
+      const result = await store.find(input);
+      if (result) {
+        addRuntimeResult(loaded, result);
+        return { result: mergeParseResults([result]), source: "database" as const };
+      }
+    } catch (error) {
+      console.warn("Neon에서 런타임 단어를 조회하지 못했습니다.", error);
+    }
+  }
+
   const local = findResultsWithKeys(loaded.index, input);
   if (local.length) {
     return {
@@ -135,18 +148,7 @@ export async function getStoredWord(input: string) {
       source: local.some((item) => loaded.baseKeys.has(item.key)) ? "pre-parsed" as const : "database" as const,
     };
   }
-
-  const store = getRuntimeVocabularyStore();
-  if (!store) return null;
-  try {
-    const result = await store.find(input);
-    if (!result) return null;
-    addRuntimeResult(loaded, result);
-    return { result: mergeParseResults(loaded.headwords.get(headwordKeyFor(result.word)) ?? [result]), source: "database" as const };
-  } catch (error) {
-    console.warn("Neon에서 런타임 단어를 조회하지 못했습니다.", error);
-    return null;
-  }
+  return null;
 }
 
 export async function getVocabularyIndex() {
@@ -156,7 +158,11 @@ export async function getVocabularyIndex() {
   if (store) {
     try {
       const runtimeWords = await store.list();
-      runtimeWords.forEach((result) => addRuntimeResult(loaded, result));
+      if (runtimeWords.length) {
+        return runtimeWords
+          .map((result) => vocabularyEntry(mergeParseResults([result])))
+          .sort((left, right) => left.word.localeCompare(right.word, "de"));
+      }
     } catch (error) {
       console.warn("Neon 런타임 단어 목록을 불러오지 못했습니다.", error);
     }

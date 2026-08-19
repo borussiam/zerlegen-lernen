@@ -1,7 +1,9 @@
 import { neon } from "@neondatabase/serverless";
 import { headwordKeyFor } from "./dictionary-entry";
 import { getGermanCaseCandidates } from "./german-word";
-import type { CefrLevel, ParseResult } from "./types";
+import { candidateFromParseResult } from "./inflection-lookup";
+import { stripGermanToken } from "./german-tokenizer";
+import type { CefrLevel, InflectionCandidate, MorphologicalMetadata, ParseResult } from "./types";
 
 export type RuntimeVocabularyQuery = (
   statement: string,
@@ -10,6 +12,18 @@ export type RuntimeVocabularyQuery = (
 
 interface RuntimeWordRow {
   result: unknown;
+}
+
+interface InflectionRow {
+  surface_form?: unknown;
+  lemma_id?: unknown;
+  morphology?: unknown;
+  exact_case?: unknown;
+  source?: unknown;
+  result?: unknown;
+  headword?: unknown;
+  article?: unknown;
+  part_of_speech?: unknown;
 }
 
 function isCefrLevel(value: unknown): value is CefrLevel {
@@ -45,8 +59,63 @@ function rowResult(row: unknown) {
   return parseStoredResult((row as RuntimeWordRow).result);
 }
 
+function parseMorphology(value: unknown): MorphologicalMetadata {
+  let parsed: unknown;
+  try {
+    parsed = typeof value === "string" ? JSON.parse(value) as unknown : value;
+  } catch {
+    parsed = null;
+  }
+  if (!parsed || typeof parsed !== "object") return { partOfSpeech: "other" };
+  const partOfSpeech = (parsed as Partial<MorphologicalMetadata>).partOfSpeech;
+  return {
+    ...(parsed as Partial<MorphologicalMetadata>),
+    partOfSpeech: typeof partOfSpeech === "string" ? partOfSpeech : "other",
+  } as MorphologicalMetadata;
+}
+
+function articleValue(value: unknown) {
+  return value === "der" || value === "die" || value === "das" ? value : null;
+}
+
+function inflectionCandidateFromRow(row: unknown): InflectionCandidate | null {
+  if (typeof row !== "object" || row === null) return null;
+  const item = row as InflectionRow;
+  const surfaceForm = typeof item.surface_form === "string" ? item.surface_form : "";
+  const lemmaId = typeof item.lemma_id === "string" ? item.lemma_id : "";
+  const result = parseStoredResult(item.result);
+  const lemma = result?.word ?? (typeof item.headword === "string" ? item.headword : "");
+  if (!surfaceForm || !lemmaId || !lemma) return null;
+  return {
+    surfaceForm,
+    lemmaId,
+    lemma,
+    article: result?.article ?? articleValue(item.article),
+    partOfSpeech: result?.partOfSpeech ?? (typeof item.part_of_speech === "string" ? item.part_of_speech : null),
+    meaning: result?.meanings[0] ?? "",
+    dictionaryEntry: result ?? undefined,
+    morphology: parseMorphology(item.morphology),
+    exactCase: item.exact_case === true,
+    source: item.source === "wiktionary-inflection" ? "wiktionary-inflection" : "surface-map",
+  };
+}
+
 export function normalizeRuntimeWord(word: string) {
-  return word.trim().normalize("NFC");
+  return stripGermanToken(word).trim().normalize("NFC");
+}
+
+function prioritizeInflectionRows(candidates: InflectionCandidate[], sentenceInitial = false) {
+  return [...candidates].sort((left, right) => {
+    const exactDifference = Number(!left.exactCase) - Number(!right.exactCase);
+    if (exactDifference) return exactDifference;
+    if (sentenceInitial) {
+      const leftNoun = left.article !== null || left.morphology.partOfSpeech === "noun" || /noun/i.test(left.partOfSpeech ?? "");
+      const rightNoun = right.article !== null || right.morphology.partOfSpeech === "noun" || /noun/i.test(right.partOfSpeech ?? "");
+      const nounDifference = Number(leftNoun) - Number(rightNoun);
+      if (nounDifference) return nounDifference;
+    }
+    return 0;
+  });
 }
 
 export function createRuntimeVocabularyStore(query: RuntimeVocabularyQuery) {
@@ -89,6 +158,83 @@ export function createRuntimeVocabularyStore(query: RuntimeVocabularyQuery) {
           result.article,
         ],
       );
+    },
+
+    async lookupInflections(surfaceForm: string, options: { exactOnly?: boolean; sentenceInitial?: boolean } = {}) {
+      const normalized = normalizeRuntimeWord(surfaceForm);
+      const lower = normalized.toLocaleLowerCase("de-DE");
+      const rows = await query(
+        `select
+           inflection_surface_forms.surface_form,
+           inflection_surface_forms.lemma_id,
+           inflection_surface_forms.morphology,
+           inflection_surface_forms.source,
+           inflection_surface_forms.surface_form = $1 as exact_case,
+           lemmas.headword,
+           lemmas.article,
+           lemmas.part_of_speech,
+           lemmas.result
+         from inflection_surface_forms
+         join lemmas on lemmas.lemma_id = inflection_surface_forms.lemma_id
+         where inflection_surface_forms.surface_form = $1
+            or ($3::boolean = false and inflection_surface_forms.surface_key = $2)
+         order by exact_case desc,
+           case
+             when $4::boolean = true
+              and lemmas.article is null
+              and coalesce(lemmas.part_of_speech, '') !~* 'noun'
+             then 0
+             else 1
+           end,
+           inflection_surface_forms.updated_at desc
+         limit 12`,
+        [normalized, lower, options.exactOnly === true, options.sentenceInitial === true],
+      );
+      return prioritizeInflectionRows(rows.flatMap((row): InflectionCandidate[] => {
+        const candidate = inflectionCandidateFromRow(row);
+        return candidate ? [candidate] : [];
+      }), options.sentenceInitial);
+    },
+
+    async upsertLemma(result: ParseResult, surfaceForms: Array<{ surfaceForm: string; morphology: MorphologicalMetadata }>) {
+      const lemmaId = `${result.partOfSpeech ?? "word"}:${result.article ?? "none"}:${result.word}`.toLocaleLowerCase("de-DE");
+      await query(
+        `insert into lemmas (lemma_id, headword, headword_key, part_of_speech, article, result)
+         values ($1, $2, $3, $4, $5, $6::jsonb)
+         on conflict (lemma_id) do update
+         set headword = excluded.headword,
+             headword_key = excluded.headword_key,
+             part_of_speech = excluded.part_of_speech,
+             article = excluded.article,
+             result = excluded.result,
+             updated_at = now()`,
+        [lemmaId, result.word, headwordKeyFor(result.word), result.partOfSpeech, result.article, JSON.stringify(result)],
+      );
+
+      await query(
+        "delete from inflection_surface_forms where lemma_id = $1 and source = 'wiktionary-inflection'",
+        [lemmaId],
+      );
+
+      await Promise.all(surfaceForms.map((item) => query(
+        `insert into inflection_surface_forms (surface_form, lemma_id, morphology, source)
+         values ($1, $2, $3::jsonb, 'wiktionary-inflection')
+         on conflict (surface_form, lemma_id, morphology) do update
+         set source = excluded.source,
+             updated_at = now()`,
+        [normalizeRuntimeWord(item.surfaceForm), lemmaId, JSON.stringify(item.morphology)],
+      )));
+
+      return candidateFromParseResult(result.word, result);
+    },
+
+    async deleteInflectionSurfaceFormsBySource(sources: readonly string[]) {
+      if (!sources.length) return 0;
+      const rows = await query(
+        "delete from inflection_surface_forms where source = any($1::text[]) returning id",
+        [sources],
+      );
+      return rows.length;
     },
   };
 }

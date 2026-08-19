@@ -42,6 +42,88 @@ export interface WordExample {
   kind?: "sentence" | "word";
 }
 
+export type MorphologicalPartOfSpeech =
+  | "noun"
+  | "verb"
+  | "adjective"
+  | "adverb"
+  | "pronoun"
+  | "preposition"
+  | "conjunction"
+  | "particle"
+  | "other";
+
+export interface MorphologicalMetadata {
+  partOfSpeech: MorphologicalPartOfSpeech;
+  case?: "nominative" | "accusative" | "dative" | "genitive";
+  tense?: "present" | "preterite" | "perfect" | "past-participle";
+  mood?: "indicative" | "imperative" | "subjunctive-i" | "subjunctive-ii";
+  person?: "1" | "2" | "3";
+  number?: "singular" | "plural";
+  gender?: "masculine" | "feminine" | "neuter";
+  degree?: "positive" | "comparative" | "superlative";
+  gradable?: boolean;
+  separablePrefix?: string;
+  auxiliary?: "haben" | "sein";
+  register?: "informal" | "formal";
+  contraction?: {
+    preposition: string;
+    article: "der" | "das" | "dem";
+  };
+}
+
+export interface InflectionCandidate {
+  surfaceForm: string;
+  lemmaId: string;
+  lemma: string;
+  article: Article;
+  partOfSpeech: string | null;
+  meaning: string;
+  dictionaryEntry?: ParseResult;
+  morphology: MorphologicalMetadata;
+  exactCase: boolean;
+  source: "surface-map" | "dictionary" | "related-separable" | "wiktionary-inflection";
+}
+
+export interface SentenceLookupResult {
+  surfaceForm: string;
+  token: string;
+  candidates: InflectionCandidate[];
+  relatedCandidates: InflectionCandidate[];
+}
+
+export interface VerbInflectionSummary {
+  kind: "verb";
+  infinitive: string;
+  preteriteThirdPerson?: string;
+  pastParticiple?: string;
+  auxiliary?: "haben" | "sein";
+  present: {
+    ich: string;
+    du: string;
+    erSieEs: string;
+    wir: string;
+    ihr: string;
+    sieSie: string;
+  };
+  imperative: {
+    du: string;
+    ihr: string;
+    sie: string;
+  };
+  konjunktivII?: Array<{ label: string; form: string }>;
+}
+
+export interface AdjectiveInflectionSummary {
+  kind: "adjective";
+  positive: string;
+  comparative?: string;
+  superlative?: string;
+  gradable: boolean;
+}
+
+export type LearnerInflectionSummary = VerbInflectionSummary | AdjectiveInflectionSummary;
+
 export interface ParseResult {
   word: string;
   article: Article;
@@ -58,6 +140,7 @@ export interface ParseResult {
   displayHeadword?: string;
   variants?: DictionaryVariant[];
   decompositionOptions?: DecompositionOption[];
+  learnerInflection?: LearnerInflectionSummary;
 }
 
 export interface FavoriteWord {
@@ -117,6 +200,7 @@ export interface DictionaryVariant {
   articleReason: string | null;
   level?: CefrLevel | null;
   sourceUrl: string;
+  learnerInflection?: LearnerInflectionSummary;
 }
 
 export interface DecompositionOption {

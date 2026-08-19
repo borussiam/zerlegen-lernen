@@ -2,9 +2,10 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FocusEvent, FormEvent, KeyboardEvent } from "react";
-import type { CefrLevel, FavoriteType, FavoriteWord, GeneratedExercise, Morpheme, ParseResult, VocabularyIndexEntry, WordbookState } from "@/lib/types";
+import type { CefrLevel, FavoriteType, FavoriteWord, GeneratedExercise, InflectionCandidate, Morpheme, ParseResult, SentenceLookupResult, VocabularyIndexEntry, WordExample, WordbookState } from "@/lib/types";
 import { articleReasonText, buildArticleQuizQuestions, isCorrectArticleAnswer, shuffleItems } from "@/lib/article-quiz";
 import type { ArticleQuizMode, ArticleQuizQuestion, DefiniteArticle } from "@/lib/article-quiz";
+import { tokenizeGermanText } from "@/lib/german-tokenizer";
 import { filterAndSortFavorites, getFavoriteTypes, isAffixWord, matchVocabulary, vocabularyForRandom } from "@/lib/vocabulary";
 import type { FavoriteFilter, FavoriteSort, MasteryScope, RandomLevelRange } from "@/lib/vocabulary";
 import {
@@ -24,9 +25,9 @@ import {
 } from "@/lib/spaced-repetition";
 
 const STORAGE_KEY = "zerlegen-lernen:favorites";
-const HISTORY_KEY = "zerlegen-lernen:results";
+const HISTORY_KEY = "zerlegen-lernen:results:v2";
 const THEME_KEY = "zerlegen-lernen:theme";
-const WORD_CACHE_KEY = "zerlegen-lernen:word-cache:v6";
+const WORD_CACHE_KEY = "zerlegen-lernen:word-cache:v7";
 const WORD_CACHE_TTL_MS = 24 * 60 * 60 * 1_000;
 const WORD_CACHE_MAX_ENTRIES = 100;
 const CLIENT_REQUEST_DELAY_MS = 175;
@@ -57,6 +58,17 @@ interface FavoritePartPopover {
   error?: string;
 }
 
+interface SentencePopover {
+  sentence: string;
+  token: string;
+  tokenIndex: number;
+  top: number;
+  left: number;
+  loading: boolean;
+  result?: SentenceLookupResult;
+  error?: string;
+}
+
 function isParseResult(value: unknown): value is ParseResult {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<ParseResult>;
@@ -64,6 +76,29 @@ function isParseResult(value: unknown): value is ParseResult {
     && Array.isArray(candidate.meanings)
     && Array.isArray(candidate.examples)
     && Array.isArray(candidate.morphemes);
+}
+
+function isInflectionCandidate(value: unknown): value is InflectionCandidate {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<InflectionCandidate>;
+  return typeof candidate.surfaceForm === "string"
+    && typeof candidate.lemmaId === "string"
+    && typeof candidate.lemma === "string"
+    && typeof candidate.meaning === "string"
+    && typeof candidate.exactCase === "boolean"
+    && typeof candidate.source === "string"
+    && Boolean(candidate.morphology);
+}
+
+function isSentenceLookupResult(value: unknown): value is SentenceLookupResult {
+  if (!value || typeof value !== "object") return false;
+  const result = value as Partial<SentenceLookupResult>;
+  return typeof result.surfaceForm === "string"
+    && typeof result.token === "string"
+    && Array.isArray(result.candidates)
+    && result.candidates.every(isInflectionCandidate)
+    && Array.isArray(result.relatedCandidates)
+    && result.relatedCandidates.every(isInflectionCandidate);
 }
 
 function normalizedWord(word: string) {
@@ -329,7 +364,8 @@ async function requestWord(word: string) {
   const existingRequest = inFlightWordRequests.get(key);
   if (existingRequest) return existingRequest;
 
-  const request = fetch(`/api/parse?word=${encodeURIComponent(key)}&v=6`, {
+  const request = fetch(`/api/parse?word=${encodeURIComponent(key)}&v=7`, {
+    cache: "no-store",
     headers: { Accept: "application/json" },
   }).then(async (response) => {
     const data = await response.json();
@@ -343,6 +379,50 @@ async function requestWord(word: string) {
 
   inFlightWordRequests.set(key, request);
   return request;
+}
+
+async function requestSentenceLookup(surface: string, sentence: string, tokenIndex: number) {
+  const params = new URLSearchParams({ surface, sentence, tokenIndex: String(tokenIndex) });
+  const response = await fetch(`/api/lookup?${params.toString()}`, {
+    headers: { Accept: "application/json" },
+  });
+  const data = await response.json() as unknown;
+  if (!response.ok || !isSentenceLookupResult(data)) {
+    const message = data && typeof data === "object" && "error" in data && typeof (data as { error?: unknown }).error === "string"
+      ? (data as { error: string }).error
+      : "단어 후보를 불러오지 못했습니다.";
+    throw new Error(message);
+  }
+  return data;
+}
+
+function clampPopover(anchor: HTMLElement, width = 336, height = 300) {
+  const bounds = anchor.getBoundingClientRect();
+  const margin = 12;
+  const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
+  const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+  const offsetLeft = window.visualViewport?.offsetLeft ?? 0;
+  const offsetTop = window.visualViewport?.offsetTop ?? 0;
+  const left = Math.max(offsetLeft + margin, Math.min(bounds.left, offsetLeft + viewportWidth - width - margin));
+  const below = bounds.bottom + 10;
+  const above = bounds.top - height - 10;
+  const top = below + height > offsetTop + viewportHeight - margin
+    ? Math.max(offsetTop + margin, above)
+    : below;
+  return { top, left };
+}
+
+function morphologyLabel(candidate: InflectionCandidate) {
+  const bits = [
+    candidate.partOfSpeech ?? candidate.morphology.partOfSpeech,
+    candidate.morphology.tense,
+    candidate.morphology.mood,
+    candidate.morphology.person ? `${candidate.morphology.person}. Person` : null,
+    candidate.morphology.number,
+    candidate.morphology.case,
+    candidate.morphology.separablePrefix ? `${candidate.morphology.separablePrefix}-` : null,
+  ].filter(Boolean);
+  return bits.join(" · ");
 }
 
 interface ChildPreview {
@@ -465,6 +545,135 @@ function MorphemeComparisonGrid({
   );
 }
 
+function LearnerInflectionPanel({ result }: { result: ParseResult }) {
+  const summary = result.learnerInflection;
+  if (!summary) return null;
+
+  if (summary.kind === "adjective") {
+    return (
+      <div className="mt-7 border-t border-ink/10 pt-7">
+        <h3 className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-moss">Steigerung · 형용사 변화</h3>
+        {summary.gradable ? (
+          <div className="grid gap-3 text-sm sm:grid-cols-3">
+            {[
+              ["원급", summary.positive, "기본 형용사 형태입니다."],
+              ["비교급", summary.comparative ?? "—", "두 대상을 비교할 때 쓰는 형태입니다."],
+              ["최상급", summary.superlative ?? "—", "가장 높은 정도를 나타내는 형태입니다."],
+            ].map(([label, form, title]) => (
+              <div key={label} className="border border-moss/15 bg-moss/5 p-4" title={title}>
+                <p className="text-[10px] font-black uppercase tracking-[0.16em] text-moss/60">{label}</p>
+                <p className="mt-2 font-serif text-xl font-bold text-moss">{form}</p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="border border-moss/15 bg-moss/5 p-4 text-sm font-semibold leading-6 text-moss" title="Wiktionary에서 not comparable로 표시된 형용사는 비교급/최상급을 만들지 않습니다.">
+            비교급과 최상급을 쓰지 않는 형용사입니다.
+          </p>
+        )}
+      </div>
+    );
+  }
+
+  const presentRows = [
+    ["ich", summary.present.ich],
+    ["du", summary.present.du],
+    ["er/sie/es", summary.present.erSieEs],
+    ["wir", summary.present.wir],
+    ["ihr", summary.present.ihr],
+    ["sie/Sie", summary.present.sieSie],
+  ];
+  const principalParts = [
+    ["Infinitiv", summary.infinitive, "사전에 실리는 기본 동사형입니다."],
+    ["Präteritum", summary.preteriteThirdPerson ?? "—", "과거 서술에 쓰는 단순 과거형입니다."],
+    ["Partizip II", summary.pastParticiple ? `${summary.auxiliary === "sein" ? "ist" : summary.auxiliary === "haben" ? "hat" : ""} ${summary.pastParticiple}`.trim() : "—", "현재완료와 수동태에 쓰는 과거분사입니다."],
+  ];
+
+  return (
+    <div className="mt-7 border-t border-ink/10 pt-7">
+      <h3 className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-moss">Konjugation · 핵심 변화</h3>
+      <div className="grid gap-3 text-sm sm:grid-cols-3">
+        {principalParts.map(([label, form, title]) => (
+          <div key={label} className="border border-moss/20 bg-moss/5 p-4" title={title}>
+            <p className="text-[10px] font-black uppercase tracking-[0.16em] text-moss/60">{label}</p>
+            <p className="mt-2 font-serif text-xl font-bold text-moss">{form}</p>
+          </div>
+        ))}
+      </div>
+      <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(13rem,0.55fr)]">
+        <div className="overflow-x-auto border border-ink/10">
+          <table className="w-full min-w-[28rem] border-collapse text-sm">
+            <thead className="bg-paper text-left text-[10px] uppercase tracking-[0.16em] text-ink/45">
+              <tr>
+                <th className="px-4 py-3">Präsens</th>
+                <th className="px-4 py-3" title="ich, du, er/sie/es, wir, ihr, sie/Sie 여섯 주어에 맞춘 현재형입니다.">Form</th>
+              </tr>
+            </thead>
+            <tbody>
+              {presentRows.map(([person, form]) => (
+                <tr key={person} className="border-t border-ink/10">
+                  <td className="px-4 py-3 font-bold text-ink/55">{person}</td>
+                  <td className="px-4 py-3 font-serif text-lg font-bold">{form}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="grid gap-3">
+          <div className="border border-coral/20 bg-coral/5 p-4">
+            <p className="text-[10px] font-black uppercase tracking-[0.16em] text-coral" title="명령, 부탁, 지시를 할 때 쓰는 동사 형태입니다.">Imperativ</p>
+            <dl className="mt-3 grid gap-2 text-sm">
+              <div className="flex justify-between gap-3"><dt className="font-bold text-ink/50">du</dt><dd className="font-serif font-bold">{summary.imperative.du}</dd></div>
+              <div className="flex justify-between gap-3"><dt className="font-bold text-ink/50">ihr</dt><dd className="font-serif font-bold">{summary.imperative.ihr}</dd></div>
+              <div className="flex justify-between gap-3"><dt className="font-bold text-ink/50">Sie</dt><dd className="font-serif font-bold">{summary.imperative.sie}</dd></div>
+            </dl>
+          </div>
+          {!!summary.konjunktivII?.length && (
+            <div className="border border-blue-200 bg-blue-50 p-4">
+              <p className="text-[10px] font-black uppercase tracking-[0.16em] text-blue-700">Konjunktiv II</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {summary.konjunktivII.map((item) => (
+                  <span key={`${item.label}-${item.form}`} className="border border-blue-200 bg-white px-3 py-2 text-sm">
+                    <span className="font-bold text-blue-800">{item.form}</span>
+                    <span className="ml-2 text-xs text-ink/45">{item.label}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ExampleSentence({
+  example,
+  onTokenClick,
+}: {
+  example: WordExample;
+  onTokenClick: (sentence: string, token: string, tokenIndex: number, anchor: HTMLButtonElement) => void;
+}) {
+  if (example.kind === "word") return <p className="font-medium">{example.sentence}</p>;
+  return (
+    <p className="font-medium">
+      <span aria-hidden>„</span>
+      {tokenizeGermanText(example.sentence).map((token, index) => token.word ? (
+        <button
+          type="button"
+          data-sentence-popover-trigger
+          key={`${token.start}-${token.raw}-${index}`}
+          onClick={(event) => onTokenClick(example.sentence, token.clean, token.index, event.currentTarget)}
+          className="inline font-medium underline decoration-moss/25 decoration-1 underline-offset-4 transition hover:text-moss focus:outline-none focus:ring-2 focus:ring-moss/30"
+        >
+          {token.raw}
+        </button>
+      ) : <span key={`${token.start}-${index}`}>{token.raw}</span>)}
+      <span aria-hidden>“</span>
+    </p>
+  );
+}
+
 export function WordWorkbench() {
   const [query, setQuery] = useState("Lehrer");
   const [results, setResults] = useState<ParseResult[]>([]);
@@ -489,6 +698,8 @@ export function WordWorkbench() {
   const [activeTab, setActiveTab] = useState<"explore" | "favorites">("explore");
   const [favoritePopover, setFavoritePopover] = useState<FavoritePartPopover | null>(null);
   const favoritePopoverRef = useRef<HTMLElement>(null);
+  const [sentencePopover, setSentencePopover] = useState<SentencePopover | null>(null);
+  const sentencePopoverRef = useRef<HTMLElement>(null);
   const [articleQuestions, setArticleQuestions] = useState<ArticleQuizQuestion[]>([]);
   const [articleQuestionIndex, setArticleQuestionIndex] = useState(0);
   const [articleAnswer, setArticleAnswer] = useState<DefiniteArticle | null>(null);
@@ -512,6 +723,7 @@ export function WordWorkbench() {
   const [reviewArticleKnown, setReviewArticleKnown] = useState<boolean | null>(null);
   const [reviewStats, setReviewStats] = useState<ReviewStats>({ reviewed: 0, success: 0, reset: 0, wordIds: [] });
   const searchFormRef = useRef<HTMLFormElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     try {
@@ -668,6 +880,20 @@ export function WordWorkbench() {
     document.addEventListener("pointerdown", dismissPopover);
     return () => document.removeEventListener("pointerdown", dismissPopover);
   }, [favoritePopover]);
+
+  useEffect(() => {
+    if (!sentencePopover) return;
+
+    function dismissPopover(event: PointerEvent) {
+      if (event.target instanceof Element && event.target.closest("[data-sentence-popover-trigger]")) return;
+      if (!sentencePopoverRef.current?.contains(event.target as Node)) {
+        setSentencePopover(null);
+      }
+    }
+
+    document.addEventListener("pointerdown", dismissPopover);
+    return () => document.removeEventListener("pointerdown", dismissPopover);
+  }, [sentencePopover]);
 
   useEffect(() => {
     let cancelled = false;
@@ -945,11 +1171,7 @@ export function WordWorkbench() {
       return;
     }
 
-    const bounds = anchor.getBoundingClientRect();
-    const left = Math.max(12, Math.min(bounds.left, window.innerWidth - 348));
-    const top = bounds.bottom + 10 > window.innerHeight - 260
-      ? Math.max(12, bounds.top - 250)
-      : bounds.bottom + 10;
+    const { top, left } = clampPopover(anchor, 336, 260);
     setFavoritePopover({ owner, part, top, left, loading: true });
     try {
       const result = await requestWord(part.lookup);
@@ -962,6 +1184,30 @@ export function WordWorkbench() {
       setFavoritePopover((current) => (
         current?.owner === owner && current.part.lookup === part.lookup
           ? { ...current, loading: false, error: caught instanceof Error ? caught.message : "정보를 불러오지 못했습니다." }
+          : current
+      ));
+    }
+  }
+
+  async function openSentenceToken(sentence: string, token: string, tokenIndex: number, anchor: HTMLButtonElement) {
+    if (sentencePopover?.sentence === sentence && sentencePopover.tokenIndex === tokenIndex) {
+      setSentencePopover(null);
+      return;
+    }
+
+    const { top, left } = clampPopover(anchor);
+    setSentencePopover({ sentence, token, tokenIndex, top, left, loading: true });
+    try {
+      const result = await requestSentenceLookup(token, sentence, tokenIndex);
+      setSentencePopover((current) => (
+        current?.sentence === sentence && current.tokenIndex === tokenIndex
+          ? { ...current, loading: false, result }
+          : current
+      ));
+    } catch (caught) {
+      setSentencePopover((current) => (
+        current?.sentence === sentence && current.tokenIndex === tokenIndex
+          ? { ...current, loading: false, error: caught instanceof Error ? caught.message : "단어 후보를 불러오지 못했습니다." }
           : current
       ));
     }
@@ -1184,6 +1430,7 @@ export function WordWorkbench() {
               <div className="flex flex-wrap gap-2 sm:flex-nowrap">
                 <div className="relative min-w-0 basis-full sm:flex-1">
                   <input
+                    ref={searchInputRef}
                     suppressHydrationWarning
                     id="word"
                     name="word"
@@ -1194,7 +1441,11 @@ export function WordWorkbench() {
                     aria-expanded={autocompleteVisible}
                     aria-activedescendant={autocompleteIndex >= 0 ? `word-option-${autocompleteIndex}` : undefined}
                     value={query}
-                    onFocus={() => query.trim() && setAutocompleteOpen(true)}
+                    onFocus={(event) => {
+                      event.currentTarget.select();
+                      if (query.trim()) setAutocompleteOpen(true);
+                    }}
+                    onClick={(event) => event.currentTarget.select()}
                     onChange={(event) => {
                       setQuery(event.target.value);
                       setAutocompleteOpen(true);
@@ -1203,8 +1454,25 @@ export function WordWorkbench() {
                     onKeyDown={handleSearchKeyDown}
                     placeholder="독일어 단어 검색"
                     autoComplete="off"
-                    className="w-full rounded-2xl border border-ink/10 bg-white px-5 py-3.5 text-base outline-none ring-moss/30 transition focus:border-moss focus:ring-4"
+                    className="w-full rounded-2xl border border-ink/10 bg-white px-5 py-3.5 pr-12 text-base outline-none ring-moss/30 transition focus:border-moss focus:ring-4"
                   />
+                  {!!query && (
+                    <button
+                      type="button"
+                      aria-label="검색어 지우기"
+                      title="검색어 지우기"
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => {
+                        setQuery("");
+                        setAutocompleteOpen(false);
+                        setAutocompleteIndex(-1);
+                        searchInputRef.current?.focus();
+                      }}
+                      className="absolute right-3 top-1/2 grid h-8 w-8 -translate-y-1/2 place-items-center rounded-full bg-ink/10 text-lg font-bold leading-none text-ink/55 transition hover:bg-ink hover:text-white"
+                    >
+                      ×
+                    </button>
+                  )}
                   {autocompleteVisible && (
                     <div id="word-suggestions" role="listbox" aria-label="단어 자동완성" className="absolute inset-x-0 top-full z-50 mt-2 max-h-96 overflow-y-auto rounded-2xl border border-ink/15 bg-white p-2 shadow-2xl">
                       {autocompleteMatches.map((entry, index) => (
@@ -1360,12 +1628,14 @@ export function WordWorkbench() {
                         )}
                       </div>
 
+                      <LearnerInflectionPanel result={result} />
+
                       <div className="mt-7 rounded-2xl border border-coral/15 bg-coral/5 p-5">
                         <h3 className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-coral">{result.examples.some((example) => example.kind === "word") ? "Beispielwörter · 예시 단어" : "Beispiel · 예문"}</h3>
                         <ul className="space-y-4">
                           {result.examples.map((example, index) => (
                             <li key={`${example.sentence}-${index}`} className="text-sm leading-6 text-ink/75">
-                              <p className="font-medium">{example.kind === "word" ? example.sentence : `„${example.sentence}“`}</p>
+                              <ExampleSentence example={example} onTokenClick={openSentenceToken} />
                               {example.translation && <p className="mt-1 text-ink/50">{example.translation}</p>}
                             </li>
                           ))}
@@ -1694,6 +1964,58 @@ export function WordWorkbench() {
             )}
           </div>
         </div>
+      )}
+
+      {sentencePopover && (
+        <aside ref={sentencePopoverRef} role="dialog" aria-label={`${sentencePopover.token} 단어 후보`} style={{ top: sentencePopover.top, left: sentencePopover.left }} className="fixed z-50 max-h-[min(28rem,calc(100svh-1.5rem))] w-[min(21rem,calc(100vw-1.5rem))] overflow-y-auto border border-ink/15 bg-white p-4 shadow-2xl">
+          <span aria-hidden className="absolute -top-2 left-8 h-4 w-4 rotate-45 border-l border-t border-ink/15 bg-white" />
+          <button type="button" onClick={() => setSentencePopover(null)} aria-label="닫기" className="absolute right-3 top-3 grid h-7 w-7 place-items-center bg-paper text-ink/55 hover:text-ink">×</button>
+          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-ink/40">예문 속 단어</p>
+          <h2 className="mt-1 pr-10 font-serif text-2xl font-bold text-moss">{sentencePopover.token}</h2>
+          {sentencePopover.loading && <p className="mt-4 animate-pulse text-sm text-ink/45">후보를 찾는 중…</p>}
+          {sentencePopover.error && <p className="mt-4 bg-red-50 p-3 text-xs leading-5 text-red-800">{sentencePopover.error}</p>}
+          {sentencePopover.result && (
+            <div className="mt-4 space-y-3">
+              {sentencePopover.result.candidates.length ? (
+                sentencePopover.result.candidates.map((candidate) => (
+                  <article key={`${candidate.source}-${candidate.lemmaId}`} className="border border-ink/10 bg-paper/65 p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {candidate.article && <span className={`border px-2 py-1 font-serif text-xs font-bold ${articleStyle[candidate.article]}`}>{candidate.article}</span>}
+                      <h3 className="font-serif text-lg font-bold">{candidate.lemma}</h3>
+                      {!candidate.exactCase && <span className="bg-white px-2 py-1 text-[10px] font-bold text-ink/45">소문자 매칭</span>}
+                    </div>
+                    <p className="mt-1 text-[10px] font-black uppercase tracking-wider text-ink/40">{morphologyLabel(candidate)}</p>
+                    <p className="mt-2 line-clamp-2 text-xs leading-5 text-ink/65">{candidate.meaning}</p>
+                    <button type="button" onClick={() => { setSentencePopover(null); void search(candidate.lemma); }} className="mt-3 w-full bg-ink px-4 py-2.5 text-xs font-bold text-white transition hover:bg-moss">자세히 보기 →</button>
+                  </article>
+                ))
+              ) : (
+                <p className="bg-paper p-3 text-xs leading-5 text-ink/55">저장된 굴절 후보가 없습니다. 자세히 보기로 사전 검색을 열 수 있습니다.</p>
+              )}
+              {!!sentencePopover.result.relatedCandidates.length && (
+                <div className="border-t border-ink/10 pt-3">
+                  <p className="text-[10px] font-black uppercase tracking-[0.16em] text-coral">분리동사 후보</p>
+                  <div className="mt-2 space-y-2">
+                    {sentencePopover.result.relatedCandidates.map((candidate) => (
+                      <button
+                        type="button"
+                        key={`${candidate.lemmaId}-${candidate.surfaceForm}`}
+                        onClick={() => { setSentencePopover(null); void search(candidate.lemma); }}
+                        className="block w-full border border-coral/20 bg-coral/5 px-3 py-2 text-left transition hover:bg-coral hover:text-white"
+                      >
+                        <span className="font-serif text-base font-bold">{candidate.lemma}</span>
+                        <span className="ml-2 text-xs opacity-70">{candidate.meaning}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {!sentencePopover.result.candidates.length && (
+                <button type="button" onClick={() => { setSentencePopover(null); void search(sentencePopover.token); }} className="w-full bg-ink px-4 py-2.5 text-xs font-bold text-white transition hover:bg-moss">자세히 보기 →</button>
+              )}
+            </div>
+          )}
+        </aside>
       )}
 
       {favoritePopover && (

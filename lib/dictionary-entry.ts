@@ -38,6 +38,7 @@ export function dictionaryVariantFromResult(result: ParseResult): DictionaryVari
     articleReason: result.articleReason,
     level: result.level ?? null,
     sourceUrl: result.sourceUrl,
+    learnerInflection: result.learnerInflection,
   };
 }
 
