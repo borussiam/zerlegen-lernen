@@ -36,6 +36,10 @@
     ".next/dev/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    ".next",
+    ".worktrees",
+    "tmp-audit-build-tsc",
+    "tmp-audit-build-tsc2"
   ]
 }

@@ -19,6 +19,7 @@ const result: ParseResult = {
 describe("runtime vocabulary store", () => {
   it("normalizes whitespace and Unicode before persistence", () => {
     expect(normalizeRuntimeWord("  La\u006Dpe  ")).toBe("Lampe");
+    expect(normalizeRuntimeWord("„Lampe,“")).toBe("Lampe");
   });
 
   it("looks up German case candidates and validates stored JSON", async () => {

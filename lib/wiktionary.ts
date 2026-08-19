@@ -2,6 +2,7 @@ import axios from "axios";
 import type { AxiosResponse } from "axios";
 import * as cheerio from "cheerio";
 import { getGermanCaseCandidates } from "./german-word";
+import { parseGermanWiktionaryInflectionsHtml } from "./wiktionary-inflections";
 import type { Article, Morpheme, MorphemeKind, ParseResult, WordExample } from "./types";
 
 const WIKTIONARY_ORIGIN = "https://en.wiktionary.org";
@@ -217,6 +218,28 @@ function morphemeMeaning(kind: MorphemeKind) {
   return "현대 독일어 분해식의 기본형입니다.";
 }
 
+const ETYMOLOGY_SUFFIXES = ["er", "e", "en", "em", "es", "keit", "heit", "ung", "lich", "isch"];
+
+function inferSuffixMorphemes(word: string, base: Morpheme): Morpheme[] {
+  const normalizedWord = word.toLocaleLowerCase("de-DE");
+  const normalizedBase = base.lookup.toLocaleLowerCase("de-DE");
+  if (!normalizedWord.startsWith(normalizedBase) || normalizedWord === normalizedBase) return [];
+
+  const suffix = normalizedWord.slice(normalizedBase.length);
+  if (!ETYMOLOGY_SUFFIXES.includes(suffix)) return [];
+  const suffixLookup = `-${suffix}`;
+  return [
+    base,
+    {
+      text: suffixLookup,
+      lookup: suffixLookup,
+      targetUrl: `${WIKTIONARY_ORIGIN}/wiki/${encodeURIComponent(suffixLookup)}#German`,
+      kind: "suffix",
+      meaning: morphemeMeaning("suffix"),
+    },
+  ];
+}
+
 const ARTICLE_SUFFIX_RULES: Array<{ endings: string[]; article: Exclude<Article, null>; reason: string }> = [
   { endings: ["-ung", "-heit", "-keit", "-schaft", "-ion", "-tät", "-ik", "-ei", "-in"], article: "die", reason: "이 접미사로 끝나는 독일어 명사는 대체로 여성명사입니다." },
   { endings: ["-chen", "-lein", "-ment", "-um"], article: "das", reason: "이 접미사로 끝나는 독일어 명사는 대체로 중성명사입니다." },
@@ -249,7 +272,7 @@ function getArticleReason(word: string, article: Article, morphemes: Morpheme[])
   return null;
 }
 
-function extractModernEtymology($: cheerio.CheerioAPI) {
+function extractModernEtymology($: cheerio.CheerioAPI, word: string) {
   for (const heading of $("h3, h4, h5").toArray()) {
     if (!/^Etymology(?: \d+)?$/i.test(clean($(heading).text()))) continue;
 
@@ -259,10 +282,12 @@ function extractModernEtymology($: cheerio.CheerioAPI) {
     for (const paragraph of paragraphs.toArray()) {
       const html = $(paragraph).html() ?? "";
       const marker = /\bequivalent to\b/i.exec(html);
+      const fromMarker = /\bfrom\b/i.exec(html);
       const paragraphText = clean($(paragraph).text());
-      if ((!marker || marker.index === undefined) && !paragraphText.includes("+")) continue;
+      if ((!marker || marker.index === undefined) && (!fromMarker || fromMarker.index === undefined) && !paragraphText.includes("+")) continue;
 
-      const fragmentHtml = marker?.index === undefined ? html : html.slice(marker.index);
+      const markerIndex = marker?.index ?? fromMarker?.index;
+      const fragmentHtml = markerIndex === undefined ? html : html.slice(markerIndex);
       const fragment = cheerio.load(`<p>${fragmentHtml}</p>`);
       const linkedParts: Array<Morpheme & { targetUrl: string }> = [];
       const seen = new Set<string>();
@@ -292,7 +317,7 @@ function extractModernEtymology($: cheerio.CheerioAPI) {
         });
       });
 
-      if (linkedParts.length >= 2) {
+      if ((marker || paragraphText.includes("+")) && linkedParts.length >= 2) {
         const lexicalParts = linkedParts.filter((part) => part.kind === "root");
         if (lexicalParts.length > 1) {
           lexicalParts.slice(0, -1).forEach((part) => {
@@ -305,6 +330,17 @@ function extractModernEtymology($: cheerio.CheerioAPI) {
           etymology: marker ? `equivalent to ${decomposition}` : decomposition,
           morphemes: linkedParts,
         };
+      }
+
+      if (linkedParts.length >= 1 && fromMarker) {
+        const inferred = inferSuffixMorphemes(word, linkedParts[0]);
+        if (inferred.length) {
+          const decomposition = inferred.map((part) => part.text).join(" + ");
+          return {
+            etymology: `from ${linkedParts[0].text}; inferred ${decomposition}`,
+            morphemes: inferred,
+          };
+        }
       }
     }
   }
@@ -375,7 +411,7 @@ export function parseEnglishWiktionaryHtml(word: string, html: string): ParseRes
   const germanHtml = germanHeading.nextUntil(".mw-heading2").toString();
   const $ = cheerio.load(`<section id="german-entry">${germanHtml}</section>`);
   const { article, partOfSpeech, meanings, examples, pluralOnly } = extractDefinitions($);
-  const { etymology, morphemes } = extractModernEtymology($);
+  const { etymology, morphemes } = extractModernEtymology($, word);
   const standaloneKind = getMorphemeKind(word);
   const resolvedMorphemes = morphemes.length
     ? morphemes
@@ -421,6 +457,36 @@ async function parseGermanWordUncached(requestedWord: string): Promise<ParseResu
 
     try {
       return parseEnglishWiktionaryHtml(parseData.parse?.title ?? candidate, html);
+    } catch (error) {
+      const missingGermanEntry = error instanceof Error
+        && error.message === "독일어 사전 항목을 찾을 수 없습니다.";
+      if (!missingGermanEntry) throw error;
+    }
+  }
+
+  throw new Error("독일어 사전 항목을 찾을 수 없습니다.");
+}
+
+export async function parseGermanWordWithInflections(input: string) {
+  const requestedWord = input.trim().normalize("NFC");
+  const candidates = getGermanCaseCandidates(requestedWord);
+  for (const candidate of candidates) {
+    const { data: parseData } = await requestWiktionary({
+      action: "parse",
+      page: candidate,
+      redirects: 1,
+      prop: "text",
+      format: "json",
+    });
+    const html = parseData.parse?.text?.["*"];
+    if (parseData.error || !html) continue;
+
+    try {
+      const title = parseData.parse?.title ?? candidate;
+      return {
+        result: parseEnglishWiktionaryHtml(title, html),
+        inflections: parseGermanWiktionaryInflectionsHtml(title, html),
+      };
     } catch (error) {
       const missingGermanEntry = error instanceof Error
         && error.message === "독일어 사전 항목을 찾을 수 없습니다.";

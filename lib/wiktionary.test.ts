@@ -5,6 +5,8 @@ import {
   parseGermanWord,
   resetWiktionaryRuntimeForTests,
 } from "./wiktionary";
+import { getLearnerInflectionSummaryFromWiktionary } from "./learner-inflections";
+import { parseGermanWiktionaryInflectionsHtml } from "./wiktionary-inflections";
 
 function response<T>(data: T): AxiosResponse<T> {
   return {
@@ -121,6 +123,91 @@ describe("parseEnglishWiktionaryHtml", () => {
       translation: null,
       source: "generated",
     }]);
+  });
+
+  it("infers a visible suffix from single-linked From etymology without collecting unrelated text", () => {
+    const html = entryHtml(`
+      <div class="mw-heading mw-heading3"><h3>Etymology</h3></div>
+      <p>From <span lang="de"><a href="/wiki/krank#German">krank</a></span>. Compare unrelated <span lang="de"><a href="/wiki/Haus#German">Haus</a></span>.</p>
+      <div class="mw-heading mw-heading3"><h3>Adjective</h3></div>
+      <ol><li>sick; ill</li></ol>
+    `);
+
+    const result = parseEnglishWiktionaryHtml("kranker", html);
+
+    expect(result.morphemes.map(({ lookup, kind }) => ({ lookup, kind }))).toEqual([
+      { lookup: "krank", kind: "root" },
+      { lookup: "-er", kind: "suffix" },
+    ]);
+    expect(result.morphemes.map((part) => part.lookup)).not.toContain("Haus");
+  });
+});
+
+describe("parseGermanWiktionaryInflectionsHtml", () => {
+  it("extracts strong verb forms without generating impossible bitten forms", () => {
+    const html = entryHtml(`
+      <div class="mw-heading mw-heading3"><h3>Verb</h3></div>
+      <p class="headword-line">bitten (class 5 strong, third-person singular present bittet, past tense bat, past participle gebeten, auxiliary haben)</p>
+      <div class="mw-heading mw-heading4"><h4>Conjugation</h4></div>
+      <table>
+        <tr><th>present</th><td>ich bitte</td><td>wir bitten</td><td>du bittest</td><td>ihr bittet</td><td>er bittet</td><td>sie bitten</td></tr>
+      </table>
+    `);
+
+    const surfaces = parseGermanWiktionaryInflectionsHtml("bitten", html).map((item) => item.surfaceForm);
+
+    expect(surfaces).toEqual(expect.arrayContaining(["bitte", "bittest", "bittet", "bat", "gebeten"]));
+    expect(surfaces).not.toEqual(expect.arrayContaining(["bittst", "bittt"]));
+  });
+
+  it("keeps present-tense person metadata from modern conjugation table classes", () => {
+    const html = entryHtml(`
+      <div class="mw-heading mw-heading3"><h3>Verb</h3></div>
+      <p class="headword-line">existieren (weak, third-person singular present existiert, past tense existierte, past participle existiert, auxiliary haben)</p>
+      <div class="mw-heading mw-heading4"><h4>Conjugation</h4></div>
+      <table>
+        <tr>
+          <td><span class="Latn" lang="de">ich</span> <span class="Latn form-of lang-de 1|s|pres-form-of origin-existieren" lang="de">existiere</span></td>
+          <td><span class="Latn" lang="de">wir</span> <span class="Latn form-of lang-de 1|p|pres-form-of origin-existieren" lang="de">existieren</span></td>
+        </tr>
+        <tr>
+          <td><span class="Latn" lang="de">du</span> <span class="Latn form-of lang-de 2|s|pres-form-of origin-existieren" lang="de">existierst</span></td>
+          <td><span class="Latn" lang="de">ihr</span> <span class="Latn form-of lang-de 2|p|pres-form-of origin-existieren" lang="de">existiert</span></td>
+        </tr>
+        <tr>
+          <td><span class="Latn" lang="de">er</span> <span class="Latn form-of lang-de 3|s|pres-form-of origin-existieren" lang="de">existiert</span></td>
+          <td><span class="Latn" lang="de">sie</span> <span class="Latn form-of lang-de 3|p|pres-form-of origin-existieren" lang="de">existieren</span></td>
+        </tr>
+      </table>
+    `);
+
+    const summary = getLearnerInflectionSummaryFromWiktionary("existieren", "Verb", parseGermanWiktionaryInflectionsHtml("existieren", html));
+
+    expect(summary).toMatchObject({
+      kind: "verb",
+      auxiliary: "haben",
+      present: {
+        ich: "existiere",
+        du: "existierst",
+        erSieEs: "existiert",
+        wir: "existieren",
+        ihr: "existiert",
+        sieSie: "existieren",
+      },
+    });
+  });
+
+  it("marks non-comparable adjectives instead of generating comparative forms", () => {
+    const html = entryHtml(`
+      <div class="mw-heading mw-heading3"><h3>Adjective</h3></div>
+      <p class="headword-line">englisch (not comparable)</p>
+      <ol><li>English</li></ol>
+    `);
+
+    const surfaces = parseGermanWiktionaryInflectionsHtml("englisch", html);
+    const summary = getLearnerInflectionSummaryFromWiktionary("englisch", "Adjective", surfaces);
+
+    expect(summary).toEqual({ kind: "adjective", positive: "englisch", gradable: false });
   });
 });
 

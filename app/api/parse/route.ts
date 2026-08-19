@@ -1,9 +1,36 @@
 import { NextRequest, NextResponse } from "next/server";
+import { addLearnerInflectionFromWiktionary } from "@/lib/learner-inflections";
 import { getStoredWord, registerParsedWord } from "@/lib/preparsed-words";
-import { parseGermanWord } from "@/lib/wiktionary";
+import { getRuntimeVocabularyStore } from "@/lib/runtime-vocabulary-store";
+import type { ParseResult } from "@/lib/types";
+import { parseGermanWordWithInflections } from "@/lib/wiktionary";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
+
+function shouldHydrateInflection(result: ParseResult) {
+  if (result.learnerInflection) return false;
+  const normalizedPos = result.partOfSpeech?.toLocaleLowerCase("en-US") ?? "";
+  return normalizedPos.includes("verb") || normalizedPos.includes("adjective");
+}
+
+async function hydrateLearnerInflection(result: ParseResult) {
+  if (!shouldHydrateInflection(result)) return result;
+  try {
+    const parsed = await parseGermanWordWithInflections(result.word);
+    const hydrated = addLearnerInflectionFromWiktionary(result, parsed.inflections);
+    const store = getRuntimeVocabularyStore();
+    if (store && parsed.inflections.length) {
+      await store.upsertLemma(hydrated, parsed.inflections).catch((error: unknown) => {
+        console.warn("Neon에 굴절형을 저장하지 못했습니다.", error);
+      });
+    }
+    return hydrated;
+  } catch (error) {
+    console.warn("Wiktionary 변화표를 불러오지 못했습니다.", error);
+    return result;
+  }
+}
 
 export async function GET(request: NextRequest) {
   const word = request.nextUrl.searchParams.get("word")?.trim() ?? "";
@@ -14,12 +41,22 @@ export async function GET(request: NextRequest) {
 
   try {
     const stored = await getStoredWord(word);
-    const registered = stored ? null : await registerParsedWord(await parseGermanWord(word));
-    const result = stored?.result ?? registered!.result;
+    const registered = stored ? null : await parseGermanWordWithInflections(word).then(async (parsed) => {
+      const result = addLearnerInflectionFromWiktionary(parsed.result, parsed.inflections);
+      const registeredWord = await registerParsedWord(result);
+      const store = getRuntimeVocabularyStore();
+      if (store && parsed.inflections.length) {
+        await store.upsertLemma(registeredWord.result, parsed.inflections).catch((error: unknown) => {
+          console.warn("Neon에 굴절형을 저장하지 못했습니다.", error);
+        });
+      }
+      return registeredWord;
+    });
+    const result = await hydrateLearnerInflection(stored?.result ?? registered!.result);
     const cacheSource = stored?.source ?? (registered!.stored ? "wiktionary-stored" : "wiktionary-unstored");
     return NextResponse.json(result, {
       headers: {
-        "Cache-Control": "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800",
+        "Cache-Control": "no-store",
         "X-Zerlegen-Cache": cacheSource,
       },
     });
