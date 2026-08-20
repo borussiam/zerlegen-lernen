@@ -3,11 +3,6 @@ import type { Element } from "domhandler";
 import type { MorphologicalMetadata } from "./types";
 
 const POS_SECTION_HEADING_SELECTOR = ".mw-heading2, .mw-heading3";
-const GERMAN_FUNCTION_WORDS = new Set([
-  "ich", "du", "er", "sie", "es", "wir", "ihr", "Sie",
-  "ein", "eine", "einen", "einem", "einer", "eines",
-  "der", "die", "das", "den", "dem", "des",
-]);
 
 export interface WiktionaryInflectionSurface {
   surfaceForm: string;
@@ -43,7 +38,6 @@ function normalizeSurface(raw: string) {
     .normalize("NFC");
 
   if (!value || value === "-" || value === "—" || value === "―") return null;
-  if (GERMAN_FUNCTION_WORDS.has(value)) return null;
   if (!/^[\p{L}ÄÖÜäöüßẞ]+(?: [\p{L}ÄÖÜäöüßẞ]+)?$/u.test(value)) return null;
   return value;
 }
@@ -57,9 +51,12 @@ function splitSurfaceText(text: string) {
 }
 
 function partOfSpeechFromHeading(heading: string): MorphologicalMetadata["partOfSpeech"] | null {
-  if (/verb/i.test(heading)) return "verb";
-  if (/noun|proper noun/i.test(heading)) return "noun";
-  if (/adjective/i.test(heading)) return "adjective";
+  if (/\bverb\b/i.test(heading)) return "verb";
+  if (/\bpronoun\b/i.test(heading)) return "pronoun";
+  if (/\barticle\b/i.test(heading)) return "article";
+  if (/\bdeterminer\b/i.test(heading)) return "determiner";
+  if (/\badjective\b/i.test(heading)) return "adjective";
+  if (/\b(?:noun|proper noun)\b/i.test(heading)) return "noun";
   return null;
 }
 
@@ -102,6 +99,21 @@ function numberFromContext(rowText: string, cellIndex: number): MorphologicalMet
   if (lowered.includes("singular")) return "singular";
   if (cellIndex % 2 === 1) return "plural";
   if (cellIndex % 2 === 0) return "singular";
+  return undefined;
+}
+
+function numberFromText(text: string): MorphologicalMetadata["number"] | undefined {
+  const lowered = text.toLocaleLowerCase("en-US");
+  if (lowered.includes("plural")) return "plural";
+  if (lowered.includes("singular")) return "singular";
+  return undefined;
+}
+
+function genderFromText(text: string): MorphologicalMetadata["gender"] | undefined {
+  const lowered = text.toLocaleLowerCase("en-US");
+  if (/\bmasculine\b|\bm\b/.test(lowered)) return "masculine";
+  if (/\bfeminine\b|\bf\b/.test(lowered)) return "feminine";
+  if (/\bneuter\b|\bn\b/.test(lowered)) return "neuter";
   return undefined;
 }
 
@@ -189,6 +201,94 @@ function addSurface(
   surfaces.set(`${surfaceForm}\n${JSON.stringify(morphology)}`, { surfaceForm, morphology });
 }
 
+function surfaceFormsFromCell($: cheerio.CheerioAPI, cell: Element, fallbackText: string) {
+  const linkedForms = $(cell).find("[lang='de']").toArray()
+    .flatMap((item) => splitSurfaceText(cleanCell($, item)));
+  if (linkedForms.length) return Array.from(new Set(linkedForms));
+  return splitSurfaceText(fallbackText);
+}
+
+interface TableCell {
+  element: Element;
+  text: string;
+  header: boolean;
+  row: number;
+  column: number;
+  rowspan: number;
+  colspan: number;
+}
+
+function tableGrid($: cheerio.CheerioAPI, table: Element) {
+  const grid: Array<Array<TableCell | undefined>> = [];
+  $(table).find("tr").each((rowIndex, row) => {
+    grid[rowIndex] ??= [];
+    let columnIndex = 0;
+    $(row).children("th, td").each((_, cell) => {
+      while (grid[rowIndex]?.[columnIndex]) columnIndex += 1;
+      const colspan = Math.max(1, Number($(cell).attr("colspan") ?? "1") || 1);
+      const rowspan = Math.max(1, Number($(cell).attr("rowspan") ?? "1") || 1);
+      const item: TableCell = {
+        element: cell,
+        text: cleanCell($, cell),
+        header: cell.tagName.toLocaleLowerCase("en-US") === "th",
+        row: rowIndex,
+        column: columnIndex,
+        rowspan,
+        colspan,
+      };
+      for (let rowOffset = 0; rowOffset < rowspan; rowOffset += 1) {
+        grid[rowIndex + rowOffset] ??= [];
+        for (let columnOffset = 0; columnOffset < colspan; columnOffset += 1) {
+          grid[rowIndex + rowOffset][columnIndex + columnOffset] = item;
+        }
+      }
+      columnIndex += colspan;
+    });
+  });
+  return grid;
+}
+
+function tableCellContext(grid: Array<Array<TableCell | undefined>>, cell: TableCell) {
+  const labels: string[] = [];
+  const row = grid[cell.row] ?? [];
+  for (let column = 0; column < cell.column; column += 1) {
+    const candidate = row[column];
+    if (candidate?.header && candidate.text && !labels.includes(candidate.text)) labels.push(candidate.text);
+  }
+  for (let rowIndex = 0; rowIndex < cell.row; rowIndex += 1) {
+    const candidate = grid[rowIndex]?.[cell.column];
+    if (candidate?.header && candidate.text && !labels.includes(candidate.text)) labels.push(candidate.text);
+  }
+  return labels.join(" ");
+}
+
+function nominalTableMorphology(
+  pos: MorphologicalMetadata["partOfSpeech"],
+  context: string,
+  fallbackNumber?: MorphologicalMetadata["number"],
+): MorphologicalMetadata {
+  return {
+    partOfSpeech: pos,
+    case: caseFromText(context),
+    number: numberFromText(context) ?? fallbackNumber,
+    gender: genderFromText(context),
+  };
+}
+
+function isMorphologyTable($: cheerio.CheerioAPI, table: Element, pos: MorphologicalMetadata["partOfSpeech"]) {
+  const className = $(table).attr("class") ?? "";
+  const caption = clean($(table).find("caption").first().text());
+  const text = cleanCell($, table).toLocaleLowerCase("en-US");
+  if (/\b(?:inflection|conjugation|declension)\b/i.test(`${className} ${caption}`)) return true;
+  if ($(table).find("[class*='form-of'][lang='de']").length) return true;
+  if (pos === "verb") return true;
+  if (pos === "noun" || pos === "article" || pos === "determiner" || pos === "pronoun") {
+    return /\b(?:nominative|accusative|dative|genitive)\b/.test(text);
+  }
+  if (pos === "adjective") return /\b(?:comparative|superlative)\b/.test(text);
+  return false;
+}
+
 function parseHeadwordLine(text: string, pos: MorphologicalMetadata["partOfSpeech"], surfaces: Map<string, WiktionaryInflectionSurface>) {
   if (pos === "verb") {
     const present = /third-person singular present\s+([^,()]+)/i.exec(text)?.[1];
@@ -236,10 +336,27 @@ function parseHeadwordLine(text: string, pos: MorphologicalMetadata["partOfSpeec
 function parseTable(
   $: cheerio.CheerioAPI,
   table: Element,
+  word: string,
   pos: MorphologicalMetadata["partOfSpeech"],
   surfaces: Map<string, WiktionaryInflectionSurface>,
 ) {
   let activeVerbTense: MorphologicalMetadata["tense"] | undefined;
+  const grid = tableGrid($, table);
+  const normalizedWord = word.toLocaleLowerCase("de-DE");
+  const pronounWordColumns = new Set<number>();
+  if (pos === "pronoun") {
+    for (const row of grid) {
+      for (const cell of row) {
+        if (!cell) continue;
+        const forms = surfaceFormsFromCell($, cell.element, cell.text)
+          .map((surfaceForm) => surfaceForm.toLocaleLowerCase("de-DE"));
+        if (!forms.includes(normalizedWord)) continue;
+        for (let offset = 0; offset < cell.colspan; offset += 1) {
+          pronounWordColumns.add(cell.column + offset);
+        }
+      }
+    }
+  }
 
   $(table).find("tr").each((_, row) => {
     const rowText = cleanCell($, row);
@@ -248,12 +365,21 @@ function parseTable(
     const rowMood = moodFromText(rowText);
     if (pos === "verb" && rowTense) activeVerbTense = rowTense;
     if (pos === "adjective" && isNotComparable(rowText)) return;
+    if (pos === "pronoun" && pronounWordColumns.size === 0) {
+      const rowForms = $(row).children("td").toArray()
+        .flatMap((cell) => surfaceFormsFromCell($, cell, cleanCell($, cell)))
+        .map((surfaceForm) => surfaceForm.toLocaleLowerCase("de-DE"));
+      if (rowForms.length && !rowForms.includes(normalizedWord)) return;
+    }
 
     $(row).children("td").each((cellIndex, cell) => {
       const text = cleanCell($, cell);
       const contextNumber = numberFromContext(rowText, cellIndex);
       const verbTense = rowMood === "imperative" ? undefined : rowTense ?? activeVerbTense;
       const formSpans = $(cell).find("[class*='form-of'][lang='de']").toArray();
+      const gridCell = grid.flat().find((item) => item?.element === cell);
+      if (pos === "pronoun" && pronounWordColumns.size && gridCell && !pronounWordColumns.has(gridCell.column)) return;
+      const nominalContext = gridCell ? `${rowText} ${tableCellContext(grid, gridCell)}` : rowText;
 
       if (formSpans.length) {
         for (const formSpan of formSpans) {
@@ -264,6 +390,8 @@ function parseTable(
             if (pos === "noun") {
               morphology.case = rowCase;
               morphology.number = contextNumber;
+            } else if (pos === "article" || pos === "determiner" || pos === "pronoun") {
+              Object.assign(morphology, nominalTableMorphology(pos, nominalContext, contextNumber));
             }
             addSurface(surfaces, surfaceForm, morphology);
           }
@@ -271,7 +399,7 @@ function parseTable(
         return;
       }
 
-      const forms = splitSurfaceText(text);
+      const forms = surfaceFormsFromCell($, cell, text);
       if (!forms.length) return;
 
       for (const surfaceForm of forms) {
@@ -283,9 +411,12 @@ function parseTable(
           morphology.tense = verbTense;
           morphology.mood = rowMood ?? "indicative";
           Object.assign(morphology, verbPersonNumberFromText(text, contextNumber));
+          if (!morphology.tense && !morphology.person && morphology.mood !== "imperative") continue;
         } else if (pos === "adjective") {
           morphology.degree = degreeFromText(rowText) ?? degreeFromText(text);
           morphology.gradable = !isNotComparable(rowText);
+        } else if (pos === "article" || pos === "determiner" || pos === "pronoun") {
+          Object.assign(morphology, nominalTableMorphology(pos, nominalContext, contextNumber));
         }
         addSurface(surfaces, surfaceForm, morphology);
       }
@@ -319,7 +450,9 @@ export function parseGermanWiktionaryInflectionsHtml(word: string, html: string)
     });
 
     parseHeadwordLine(headwordText, pos, surfaces);
-    contents.filter("table").add(contents.find("table")).each((_, table) => parseTable($, table, pos, surfaces));
+    contents.filter("table").add(contents.find("table")).each((_, table) => {
+      if (isMorphologyTable($, table, pos)) parseTable($, table, word, pos, surfaces);
+    });
   }
 
   return Array.from(surfaces.values());

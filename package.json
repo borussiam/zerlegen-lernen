@@ -14,6 +14,8 @@
     "test": "vitest run",
     "db:migrate": "tsx scripts/migrate-runtime-vocabulary.ts",
     "db:seed-runtime": "tsx scripts/seed-runtime-vocabulary.ts",
+    "db:seed-function-words": "tsx scripts/seed-function-words.ts",
+    "db:sanitize-lemmas": "tsx scripts/sanitize-db-lemmas.ts",
     "data:build": "tsx scripts/build-preparsed-words.ts",
     "data:audit": "tsx scripts/audit-vocabulary-data.ts",
     "data:audit-cefr": "tsx scripts/audit-cefr-ingestion.ts",

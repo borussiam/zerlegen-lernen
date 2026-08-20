@@ -4,6 +4,7 @@ import { getStoredWord, registerParsedWord } from "@/lib/preparsed-words";
 import { getRuntimeVocabularyStore } from "@/lib/runtime-vocabulary-store";
 import type { ParseResult } from "@/lib/types";
 import { parseGermanWordWithInflections } from "@/lib/wiktionary";
+import { ingestGermanWiktionaryEntry } from "@/lib/wiktionary-ingestion";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -40,16 +41,41 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    const store = getRuntimeVocabularyStore();
+    if (store) {
+      const existingCandidates = await store.lookupInflections(word, { exactOnly: true });
+      if (existingCandidates[0]?.dictionaryEntry) {
+        return NextResponse.json({
+          ...existingCandidates[0].dictionaryEntry,
+          lookupSurfaceForm: word,
+          lookupMorphology: existingCandidates[0].morphology,
+        }, {
+          headers: {
+            "Cache-Control": "no-store",
+            "X-Zerlegen-Cache": "database-surface",
+          },
+        });
+      }
+
+      const ingested = await ingestGermanWiktionaryEntry(word, store);
+      const surface = ingested.requestedSurfaceForms[0]
+        ?? ingested.surfaceForms.find((item) => item.surfaceForm === word);
+      return NextResponse.json({
+        ...ingested.result,
+        lookupSurfaceForm: word,
+        lookupMorphology: surface?.morphology ?? null,
+      }, {
+        headers: {
+          "Cache-Control": "no-store",
+          "X-Zerlegen-Cache": "wiktionary-database",
+        },
+      });
+    }
+
     const stored = await getStoredWord(word);
     const registered = stored ? null : await parseGermanWordWithInflections(word).then(async (parsed) => {
       const result = addLearnerInflectionFromWiktionary(parsed.result, parsed.inflections);
       const registeredWord = await registerParsedWord(result);
-      const store = getRuntimeVocabularyStore();
-      if (store && parsed.inflections.length) {
-        await store.upsertLemma(registeredWord.result, parsed.inflections).catch((error: unknown) => {
-          console.warn("Neon에 굴절형을 저장하지 못했습니다.", error);
-        });
-      }
       return registeredWord;
     });
     const result = await hydrateLearnerInflection(stored?.result ?? registered!.result);

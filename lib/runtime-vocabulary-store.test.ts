@@ -55,4 +55,18 @@ describe("runtime vocabulary store", () => {
     expect(calls[0]?.statement).toContain("on conflict (normalized_word) do update");
     expect(calls[0]?.parameters).toEqual(["Lampe", "Lampe", JSON.stringify(result), "lampe", "Noun", "die"]);
   });
+
+  it("looks up inflection surfaces with strict surface_form equality", async () => {
+    const calls: Array<{ statement: string; parameters?: readonly unknown[] }> = [];
+    const store = createRuntimeVocabularyStore(async (statement, parameters) => {
+      calls.push({ statement, parameters });
+      return [];
+    });
+
+    await store.lookupInflections("mir");
+
+    expect(calls[0]?.statement).toContain("where inflection_surface_forms.surface_form = $1");
+    expect(calls[0]?.statement).not.toContain("inflection_surface_forms.surface_key = $2");
+    expect(calls[0]?.statement).toContain("lemmas.headword !~ '(^-|-$)'");
+  });
 });

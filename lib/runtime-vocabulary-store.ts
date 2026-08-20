@@ -177,18 +177,23 @@ export function createRuntimeVocabularyStore(query: RuntimeVocabularyQuery) {
          from inflection_surface_forms
          join lemmas on lemmas.lemma_id = inflection_surface_forms.lemma_id
          where inflection_surface_forms.surface_form = $1
-            or ($3::boolean = false and inflection_surface_forms.surface_key = $2)
          order by exact_case desc,
            case
-             when $4::boolean = true
+             when $3::boolean = true
               and lemmas.article is null
               and coalesce(lemmas.part_of_speech, '') !~* 'noun'
              then 0
              else 1
            end,
+           case
+             when lemmas.headword = $1 then 0
+             when lemmas.headword_key = $2 and lemmas.headword !~ '(^-|-$)' then 1
+             when lemmas.headword ~ '(^-|-$)' then 3
+             else 2
+           end,
            inflection_surface_forms.updated_at desc
          limit 12`,
-        [normalized, lower, options.exactOnly === true, options.sentenceInitial === true],
+        [normalized, lower, options.sentenceInitial === true],
       );
       return prioritizeInflectionRows(rows.flatMap((row): InflectionCandidate[] => {
         const candidate = inflectionCandidateFromRow(row);
