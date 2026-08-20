@@ -3,7 +3,7 @@ import type { AxiosResponse } from "axios";
 import * as cheerio from "cheerio";
 import { getGermanCaseCandidates } from "./german-word";
 import { parseGermanWiktionaryInflectionsHtml } from "./wiktionary-inflections";
-import type { Article, Morpheme, MorphemeKind, ParseResult, WordExample } from "./types";
+import type { Article, Morpheme, MorphemeKind, MorphologicalMetadata, ParseResult, WordExample } from "./types";
 
 const WIKTIONARY_ORIGIN = "https://en.wiktionary.org";
 const API_URL = `${WIKTIONARY_ORIGIN}/w/api.php`;
@@ -13,7 +13,7 @@ const CACHE_MAX_ENTRIES = 250;
 const REQUEST_INTERVAL_MS = 175;
 const MAX_RATE_LIMIT_RETRIES = 2;
 const SECTION_HEADING_SELECTOR = ".mw-heading2, .mw-heading3, .mw-heading4, .mw-heading5";
-const PART_OF_SPEECH = /^(?:Noun|Proper noun|Verb|Adjective|Adverb|Participle|Pronoun|Numeral|Interjection|Preposition|Conjunction|Prefix|Suffix|Affix|Infix|Interfix|Circumfix|Particle)(?: \d+)?$/i;
+const PART_OF_SPEECH = /^(?:Noun|Proper noun|Verb|Adjective|Adverb|Participle|Article|Determiner|Pronoun|Numeral|Interjection|Preposition|Conjunction|Prefix|Suffix|Affix|Infix|Interfix|Circumfix|Particle)(?: \d+)?$/i;
 
 interface WiktionaryApiError {
   code?: string;
@@ -33,6 +33,11 @@ interface WiktionaryApiResponse {
 interface CacheEntry {
   expiresAt: number;
   result: ParseResult;
+}
+
+export interface GermanFormOfTarget {
+  lemma: string;
+  morphology: MorphologicalMetadata;
 }
 
 interface WiktionaryRuntimeState {
@@ -397,6 +402,108 @@ function extractDefinitions($: cheerio.CheerioAPI) {
   return { article, partOfSpeech, meanings, examples, pluralOnly };
 }
 
+function morphologyPartOfSpeech(heading: string): MorphologicalMetadata["partOfSpeech"] {
+  const normalized = heading.toLocaleLowerCase("en-US");
+  if (normalized.includes("verb") || normalized.includes("participle")) return "verb";
+  if (normalized.includes("pronoun")) return "pronoun";
+  if (normalized.includes("article")) return "article";
+  if (normalized.includes("determiner")) return "determiner";
+  if (normalized.includes("adjective")) return "adjective";
+  if (normalized.includes("adverb")) return "adverb";
+  if (normalized.includes("noun")) return "noun";
+  if (normalized.includes("preposition")) return "preposition";
+  if (normalized.includes("conjunction")) return "conjunction";
+  if (normalized.includes("particle")) return "particle";
+  return "other";
+}
+
+function morphologyFromDefinitionText(text: string, heading: string): MorphologicalMetadata {
+  const lowered = text.toLocaleLowerCase("en-US");
+  const morphology: MorphologicalMetadata = { partOfSpeech: morphologyPartOfSpeech(heading) };
+  if (lowered.includes("nominative")) morphology.case = "nominative";
+  else if (lowered.includes("accusative")) morphology.case = "accusative";
+  else if (lowered.includes("dative")) morphology.case = "dative";
+  else if (lowered.includes("genitive")) morphology.case = "genitive";
+
+  if (lowered.includes("plural")) morphology.number = "plural";
+  else if (lowered.includes("singular")) morphology.number = "singular";
+
+  if (lowered.includes("masculine")) morphology.gender = "masculine";
+  else if (lowered.includes("feminine")) morphology.gender = "feminine";
+  else if (lowered.includes("neuter")) morphology.gender = "neuter";
+
+  if (lowered.includes("preterite") || lowered.includes("past tense")) morphology.tense = "preterite";
+  else if (lowered.includes("past participle")) morphology.tense = "past-participle";
+  else if (lowered.includes("present")) morphology.tense = "present";
+
+  if (lowered.includes("imperative")) morphology.mood = "imperative";
+  else if (lowered.includes("subjunctive ii") || lowered.includes("subjunctive-ii")) morphology.mood = "subjunctive-ii";
+  else if (lowered.includes("subjunctive i") || lowered.includes("subjunctive-i")) morphology.mood = "subjunctive-i";
+  else if (morphology.tense) morphology.mood = "indicative";
+
+  if (lowered.includes("first") && !lowered.includes("second")) morphology.person = "1";
+  else if (lowered.includes("second")) morphology.person = "2";
+  else if (lowered.includes("third")) morphology.person = "3";
+
+  return morphology;
+}
+
+function hasInflectionalMorphology(morphology: MorphologicalMetadata) {
+  return Boolean(
+    morphology.case
+    || morphology.tense
+    || morphology.mood
+    || morphology.person
+    || morphology.number
+    || morphology.gender
+    || morphology.degree,
+  );
+}
+
+export function extractGermanFormOfTargetsHtml(html: string): GermanFormOfTarget[] {
+  const page = cheerio.load(html);
+  const germanHeading = page("h2")
+    .filter((_, heading) => clean(page(heading).text()) === "German")
+    .first()
+    .closest(".mw-heading");
+
+  if (!germanHeading.length) return [];
+
+  const germanHtml = germanHeading.nextUntil(".mw-heading2").toString();
+  const $ = cheerio.load(`<section id="german-entry">${germanHtml}</section>`);
+  const targets = new Map<string, GermanFormOfTarget>();
+
+  for (const heading of $("h3, h4, h5").toArray()) {
+    const headingText = clean($(heading).text());
+    if (!PART_OF_SPEECH.test(headingText)) continue;
+
+    const contents = $(heading).closest(".mw-heading").nextUntil(SECTION_HEADING_SELECTOR);
+    contents.filter("ol").first().find("li").each((_, item) => {
+      const definition = $(item);
+      const text = clean(definition.text());
+      if (!/\binflection\s+of\b/i.test(text) && !/\bof\b/i.test(text)) return;
+      const morphology = morphologyFromDefinitionText(text, headingText);
+      if (!/\binflection\s+of\b/i.test(text) && !hasInflectionalMorphology(morphology)) return;
+
+      const links = definition.find(".form-of-definition-link a[href], i.mention[lang='de'] a[href], [lang='de'] a[href]").toArray();
+      const link = links.find((candidate) => {
+        const linkedPage = getLinkedPage($(candidate).attr("href") ?? "");
+        return linkedPage?.lookup && linkedPage.lookup !== "#";
+      });
+      if (!link) return;
+
+      const linkedPage = getLinkedPage($(link).attr("href") ?? "");
+      const lemma = linkedPage?.lookup.trim().normalize("NFC") ?? "";
+      if (!lemma || lemma.startsWith("Appendix:") || lemma.includes("#")) return;
+
+      const key = `${lemma}\n${JSON.stringify(morphology)}`;
+      targets.set(key, { lemma, morphology });
+    });
+  }
+
+  return Array.from(targets.values());
+}
+
 export function parseEnglishWiktionaryHtml(word: string, html: string): ParseResult {
   const page = cheerio.load(html);
   const germanHeading = page("h2")
@@ -483,9 +590,13 @@ export async function parseGermanWordWithInflections(input: string) {
 
     try {
       const title = parseData.parse?.title ?? candidate;
+      const result = parseEnglishWiktionaryHtml(title, html);
+      const resultMorphologyPartOfSpeech = morphologyPartOfSpeech(result.partOfSpeech ?? "");
       return {
-        result: parseEnglishWiktionaryHtml(title, html),
+        result,
         inflections: parseGermanWiktionaryInflectionsHtml(title, html),
+        formOfTargets: extractGermanFormOfTargetsHtml(html)
+          .filter((target) => target.morphology.partOfSpeech === resultMorphologyPartOfSpeech),
       };
     } catch (error) {
       const missingGermanEntry = error instanceof Error
@@ -495,6 +606,28 @@ export async function parseGermanWordWithInflections(input: string) {
   }
 
   throw new Error("독일어 사전 항목을 찾을 수 없습니다.");
+}
+
+export async function parseCanonicalGermanWordWithInflections(input: string) {
+  const parsed = await parseGermanWordWithInflections(input);
+  const normalizedTitle = parsed.result.word.toLocaleLowerCase("de-DE");
+  const target = parsed.formOfTargets.find((item) => item.lemma.toLocaleLowerCase("de-DE") !== normalizedTitle);
+  if (!target) {
+    return {
+      ...parsed,
+      requestedResult: parsed.result,
+      requestedSurfaceForms: [] as Array<{ surfaceForm: string; morphology: MorphologicalMetadata }>,
+    };
+  }
+
+  const canonical = await parseGermanWordWithInflections(target.lemma);
+  return {
+    ...canonical,
+    requestedResult: parsed.result,
+    requestedSurfaceForms: parsed.formOfTargets
+      .filter((item) => item.lemma.toLocaleLowerCase("de-DE") === canonical.result.word.toLocaleLowerCase("de-DE"))
+      .map((item) => ({ surfaceForm: parsed.result.word, morphology: item.morphology })),
+  };
 }
 
 export function resetWiktionaryRuntimeForTests() {

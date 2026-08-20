@@ -47,6 +47,8 @@ export type MorphologicalPartOfSpeech =
   | "verb"
   | "adjective"
   | "adverb"
+  | "article"
+  | "determiner"
   | "pronoun"
   | "preposition"
   | "conjunction"

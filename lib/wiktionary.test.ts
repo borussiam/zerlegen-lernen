@@ -1,6 +1,7 @@
 import axios, { AxiosHeaders, type AxiosResponse } from "axios";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  extractGermanFormOfTargetsHtml,
   parseEnglishWiktionaryHtml,
   parseGermanWord,
   resetWiktionaryRuntimeForTests,
@@ -208,6 +209,47 @@ describe("parseGermanWiktionaryInflectionsHtml", () => {
     const summary = getLearnerInflectionSummaryFromWiktionary("englisch", "Adjective", surfaces);
 
     expect(summary).toEqual({ kind: "adjective", positive: "englisch", gradable: false });
+  });
+
+  it("extracts article declension surfaces from case and gender tables", () => {
+    const html = entryHtml(`
+      <div class="mw-heading mw-heading3"><h3>Article</h3></div>
+      <p class="headword-line">der</p>
+      <ol><li>nominative masculine singular definite article</li></ol>
+      <div class="mw-heading mw-heading4"><h4>Declension</h4></div>
+      <table class="inflection-table">
+        <tr><th rowspan="2"></th><th colspan="3">singular</th><th rowspan="2">plural</th></tr>
+        <tr><th>masculine</th><th>feminine</th><th>neuter</th></tr>
+        <tr><th>nominative</th><td><span lang="de">der</span></td><td><span lang="de">die</span></td><td><span lang="de">das</span></td><td><span lang="de">die</span></td></tr>
+        <tr><th>genitive</th><td><span lang="de">des</span></td><td><span lang="de">der</span></td><td><span lang="de">des</span></td><td><span lang="de">der</span></td></tr>
+        <tr><th>dative</th><td><span lang="de">dem</span></td><td><span lang="de">der</span></td><td><span lang="de">dem</span></td><td><span lang="de">den</span></td></tr>
+      </table>
+    `);
+
+    const surfaces = parseGermanWiktionaryInflectionsHtml("der", html);
+
+    expect(surfaces).toEqual(expect.arrayContaining([
+      { surfaceForm: "des", morphology: { partOfSpeech: "article", case: "genitive", number: "singular", gender: "masculine" } },
+      { surfaceForm: "dem", morphology: { partOfSpeech: "article", case: "dative", number: "singular", gender: "masculine" } },
+      { surfaceForm: "die", morphology: { partOfSpeech: "article", case: "nominative", number: "plural" } },
+    ]));
+  });
+});
+
+describe("extractGermanFormOfTargetsHtml", () => {
+  it("extracts canonical parent lemmas and surface morphology from German form-of definitions", () => {
+    const html = entryHtml(`
+      <div class="mw-heading mw-heading3"><h3>Verb</h3></div>
+      <p class="headword-line">ging</p>
+      <ol>
+        <li><span class="form-of-definition use-with-mention">first/third-person singular preterite of <span class="form-of-definition-link"><i class="Latn mention" lang="de"><a href="/wiki/gehen#German">gehen</a></i></span></span></li>
+      </ol>
+    `);
+
+    expect(extractGermanFormOfTargetsHtml(html)).toEqual([{
+      lemma: "gehen",
+      morphology: { partOfSpeech: "verb", tense: "preterite", mood: "indicative", person: "1", number: "singular" },
+    }]);
   });
 });
 

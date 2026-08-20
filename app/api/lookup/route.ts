@@ -3,6 +3,7 @@ import { candidateFromParseResult, dedupeInflectionCandidates, emptySurfaceLooku
 import { stripGermanToken } from "@/lib/german-tokenizer";
 import { getStoredWord } from "@/lib/preparsed-words";
 import { getRuntimeVocabularyStore } from "@/lib/runtime-vocabulary-store";
+import { ingestGermanWiktionaryEntry } from "@/lib/wiktionary-ingestion";
 import type { InflectionCandidate } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -53,6 +54,21 @@ export async function GET(request: NextRequest) {
       }
     } catch (error) {
       console.warn("Neon에서 굴절형 후보를 조회하지 못했습니다.", error);
+    }
+
+    if (!databaseCandidates.length) {
+      try {
+        await ingestGermanWiktionaryEntry(surface, store);
+        for (const lookupToken of orderedSurfaceLookupTokens(surface)) {
+          databaseCandidates = await store.lookupInflections(lookupToken.value, {
+            exactOnly: lookupToken.exactCase,
+            sentenceInitial,
+          });
+          if (databaseCandidates.length) break;
+        }
+      } catch (error) {
+        console.warn("Wiktionary 동적 수집으로 토큰 후보를 만들지 못했습니다.", error);
+      }
     }
   }
 
