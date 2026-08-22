@@ -3,6 +3,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadEnvConfig } from "@next/env";
 import { neon } from "@neondatabase/serverless";
+import { PREPOSITION_CONTRACTION_LEMMAS } from "../lib/preposition-contractions";
 import { createRuntimeVocabularyStore, type RuntimeVocabularyQuery } from "../lib/runtime-vocabulary-store";
 import { ingestGermanWiktionaryEntry } from "../lib/wiktionary-ingestion";
 
@@ -19,6 +20,7 @@ const FUNCTION_WORD_LEMMAS = [
   "durch", "für", "ohne", "gegen", "über", "unter", "vor", "hinter",
   "neben", "zwischen",
   "und", "oder", "aber", "denn", "weil", "dass", "ob", "wenn", "als", "obwohl",
+  "am",
 ];
 
 interface SeedOptions {
@@ -45,7 +47,10 @@ export async function applyRuntimeSchema(query: RuntimeVocabularyQuery) {
 
 export async function seedFunctionWords(query: RuntimeVocabularyQuery, options: SeedOptions = {}) {
   const store = createRuntimeVocabularyStore(query);
-  const uniqueWords = Array.from(new Set(options.words?.length ? options.words : FUNCTION_WORD_LEMMAS));
+  const requestedWords = options.words?.length
+    ? options.words
+    : [...FUNCTION_WORD_LEMMAS, ...PREPOSITION_CONTRACTION_LEMMAS];
+  const uniqueWords = Array.from(new Set(requestedWords));
   const words = options.limit && options.limit > 0 ? uniqueWords.slice(0, options.limit) : uniqueWords;
   let seeded = 0;
   const failures: Array<{ word: string; error: string }> = [];

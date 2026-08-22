@@ -3,6 +3,15 @@ import type { Element } from "domhandler";
 import type { MorphologicalMetadata } from "./types";
 
 const POS_SECTION_HEADING_SELECTOR = ".mw-heading2, .mw-heading3";
+const SUBJECT_PRONOUN = String.raw`(?:ich|du|er|sie|es|wir|ihr|Sie|man)`;
+const LEADING_SUBJECT_PRONOUNS = new RegExp(
+  String.raw`^${SUBJECT_PRONOUN}(?:(?:\s*(?:\/|,|und)\s*|\s+)${SUBJECT_PRONOUN})*\s+`,
+  "iu",
+);
+const STANDALONE_SUBJECT_PRONOUN = new RegExp(String.raw`^${SUBJECT_PRONOUN}$`, "iu");
+const NOMINAL_DECLENSION_ARTICLE = String.raw`(?:der|die|das|des|dem|den|ein|eine|eines|einem|einen|einer)`;
+const LEADING_NOMINAL_DECLENSION_ARTICLE = new RegExp(String.raw`^${NOMINAL_DECLENSION_ARTICLE}\s+`, "iu");
+const STANDALONE_NOMINAL_DECLENSION_ARTICLE = new RegExp(String.raw`^${NOMINAL_DECLENSION_ARTICLE}$`, "iu");
 
 export interface WiktionaryInflectionSurface {
   surfaceForm: string;
@@ -31,15 +40,23 @@ function cleanCell($: cheerio.CheerioAPI, cell: Element) {
 
 function normalizeSurface(raw: string) {
   const value = clean(raw)
-    .replace(/^(?:ich|du|er|sie|es|wir|ihr|Sie)(?:,\s*(?:sie|es))*\s+/u, "")
+    .replace(LEADING_SUBJECT_PRONOUNS, "")
     .replace(/^(?:er|sie|es|sie)\s+(?:ist|sind)\s+/u, "")
-    .replace(/^(?:ein(?:e[rsnmn]?)?|der|die|das|des|dem|den)\s+/u, "")
+    .replace(LEADING_NOMINAL_DECLENSION_ARTICLE, "")
     .replace(/\s+$/, "")
     .normalize("NFC");
 
   if (!value || value === "-" || value === "—" || value === "―") return null;
   if (!/^[\p{L}ÄÖÜäöüßẞ]+(?: [\p{L}ÄÖÜäöüßẞ]+)?$/u.test(value)) return null;
   return value;
+}
+
+function isStandaloneSubjectPronoun(surfaceForm: string) {
+  return STANDALONE_SUBJECT_PRONOUN.test(surfaceForm);
+}
+
+function isStandaloneNominalDeclensionArticle(surfaceForm: string) {
+  return STANDALONE_NOMINAL_DECLENSION_ARTICLE.test(surfaceForm);
 }
 
 function splitSurfaceText(text: string) {
@@ -198,14 +215,35 @@ function addSurface(
   surfaceForm: string,
   morphology: MorphologicalMetadata,
 ) {
+  if (morphology.partOfSpeech === "verb" && isStandaloneSubjectPronoun(surfaceForm)) return;
+  if (
+    (morphology.partOfSpeech === "noun" || morphology.partOfSpeech === "adjective")
+    && isStandaloneNominalDeclensionArticle(surfaceForm)
+  ) return;
   surfaces.set(`${surfaceForm}\n${JSON.stringify(morphology)}`, { surfaceForm, morphology });
 }
 
-function surfaceFormsFromCell($: cheerio.CheerioAPI, cell: Element, fallbackText: string) {
+function surfaceFormsFromCell(
+  $: cheerio.CheerioAPI,
+  cell: Element,
+  fallbackText: string,
+  pos?: MorphologicalMetadata["partOfSpeech"],
+) {
   const linkedForms = $(cell).find("[lang='de']").toArray()
     .flatMap((item) => splitSurfaceText(cleanCell($, item)));
+  const fallbackForms = splitSurfaceText(fallbackText);
+  if (pos === "verb") {
+    return Array.from(new Set([...fallbackForms, ...linkedForms].filter((surfaceForm) => (
+      !isStandaloneSubjectPronoun(surfaceForm)
+    ))));
+  }
+  if (pos === "noun" || pos === "adjective") {
+    return Array.from(new Set([...fallbackForms, ...linkedForms].filter((surfaceForm) => (
+      !isStandaloneNominalDeclensionArticle(surfaceForm)
+    ))));
+  }
   if (linkedForms.length) return Array.from(new Set(linkedForms));
-  return splitSurfaceText(fallbackText);
+  return fallbackForms;
 }
 
 interface TableCell {
@@ -348,7 +386,7 @@ function parseTable(
     for (const row of grid) {
       for (const cell of row) {
         if (!cell) continue;
-        const forms = surfaceFormsFromCell($, cell.element, cell.text)
+        const forms = surfaceFormsFromCell($, cell.element, cell.text, pos)
           .map((surfaceForm) => surfaceForm.toLocaleLowerCase("de-DE"));
         if (!forms.includes(normalizedWord)) continue;
         for (let offset = 0; offset < cell.colspan; offset += 1) {
@@ -367,7 +405,7 @@ function parseTable(
     if (pos === "adjective" && isNotComparable(rowText)) return;
     if (pos === "pronoun" && pronounWordColumns.size === 0) {
       const rowForms = $(row).children("td").toArray()
-        .flatMap((cell) => surfaceFormsFromCell($, cell, cleanCell($, cell)))
+        .flatMap((cell) => surfaceFormsFromCell($, cell, cleanCell($, cell), pos))
         .map((surfaceForm) => surfaceForm.toLocaleLowerCase("de-DE"));
       if (rowForms.length && !rowForms.includes(normalizedWord)) return;
     }
@@ -399,7 +437,7 @@ function parseTable(
         return;
       }
 
-      const forms = surfaceFormsFromCell($, cell, text);
+      const forms = surfaceFormsFromCell($, cell, text, pos);
       if (!forms.length) return;
 
       for (const surfaceForm of forms) {

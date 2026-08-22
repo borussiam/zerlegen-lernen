@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FocusEvent, FormEvent, KeyboardEvent } from "react";
-import type { CefrLevel, FavoriteType, FavoriteWord, GeneratedExercise, InflectionCandidate, Morpheme, ParseResult, SentenceLookupResult, VocabularyIndexEntry, WordExample, WordbookState } from "@/lib/types";
+import type { CefrLevel, FavoriteType, FavoriteWord, GeneratedExercise, InflectionCandidate, Morpheme, MorphologicalMetadata, ParseResult, SentenceLookupResult, VocabularyIndexEntry, WordExample, WordbookState } from "@/lib/types";
 import { articleReasonText, buildArticleQuizQuestions, isCorrectArticleAnswer, shuffleItems } from "@/lib/article-quiz";
 import type { ArticleQuizMode, ArticleQuizQuestion, DefiniteArticle } from "@/lib/article-quiz";
 import { tokenizeGermanText } from "@/lib/german-tokenizer";
@@ -413,6 +413,13 @@ function clampPopover(anchor: HTMLElement, width = 336, height = 300) {
 }
 
 function morphologyLabel(candidate: InflectionCandidate) {
+  if (candidate.morphology.contraction === true) {
+    return [
+      "Verschmelzung",
+      candidate.morphology.case,
+    ].filter(Boolean).join(" · ");
+  }
+
   const bits = [
     candidate.partOfSpeech ?? candidate.morphology.partOfSpeech,
     candidate.morphology.tense,
@@ -423,6 +430,25 @@ function morphologyLabel(candidate: InflectionCandidate) {
     candidate.morphology.separablePrefix ? `${candidate.morphology.separablePrefix}-` : null,
   ].filter(Boolean);
   return bits.join(" · ");
+}
+
+function contractionParts(morphology?: MorphologicalMetadata | null) {
+  if (!morphology) return null;
+  if (morphology.contraction === true && morphology.preposition && morphology.article) {
+    return { preposition: morphology.preposition, article: morphology.article };
+  }
+  if (typeof morphology.contraction === "object") {
+    return {
+      preposition: morphology.contraction.preposition,
+      article: morphology.contraction.article,
+    };
+  }
+  return null;
+}
+
+function contractionHeadword(headword: string, morphology?: MorphologicalMetadata | null) {
+  const parts = contractionParts(morphology);
+  return parts ? `${parts.preposition} (+ ${parts.article})` : headword;
 }
 
 interface ChildPreview {
@@ -1550,6 +1576,7 @@ export function WordWorkbench() {
                   const decompositionOptions = result.decompositionOptions?.length ? result.decompositionOptions : null;
                   const articleRule = articleReasonText(result.articleReason, result.article);
                   const displayHeadword = result.displayHeadword ?? result.word;
+                  const visibleHeadword = contractionHeadword(displayHeadword, result.lookupMorphology);
                   const combinedTitle = Boolean(result.displayHeadword && result.displayHeadword !== result.word);
                   return (
                     <section key={`${result.word}-${resultIndex}`} className={`rounded-[2rem] border bg-white/90 p-6 shadow-card transition sm:p-9 ${current ? "border-moss/30" : "border-ink/10"}`}>
@@ -1557,7 +1584,7 @@ export function WordWorkbench() {
                         <div className="min-w-0">
                           <div className="flex items-center gap-3 sm:gap-4">
                             {result.article && !combinedTitle && <span className={`rounded-2xl border px-4 py-1.5 font-serif text-xl font-bold leading-none shadow-sm sm:text-2xl ${articleStyle[result.article]}`}>{result.article}</span>}
-                            <h2 className="min-w-0 break-words font-serif text-4xl font-bold [overflow-wrap:anywhere] sm:text-5xl">{displayHeadword}</h2>
+                            <h2 className="min-w-0 break-words font-serif text-4xl font-bold [overflow-wrap:anywhere] sm:text-5xl">{visibleHeadword}</h2>
                           </div>
                           <div className="mt-3 flex flex-wrap items-center gap-2">
                             {variants ? variants.map((variant) => (
@@ -1981,12 +2008,11 @@ export function WordWorkbench() {
                   <article key={`${candidate.source}-${candidate.lemmaId}`} className="border border-ink/10 bg-paper/65 p-3">
                     <div className="flex flex-wrap items-center gap-2">
                       {candidate.article && <span className={`border px-2 py-1 font-serif text-xs font-bold ${articleStyle[candidate.article]}`}>{candidate.article}</span>}
-                      <h3 className="font-serif text-lg font-bold">{candidate.lemma}</h3>
-                      {!candidate.exactCase && <span className="bg-white px-2 py-1 text-[10px] font-bold text-ink/45">소문자 매칭</span>}
+                      <h3 className="font-serif text-xl font-bold text-ink">{contractionHeadword(candidate.lemma, candidate.morphology)}</h3>
                     </div>
                     <p className="mt-1 text-[10px] font-black uppercase tracking-wider text-ink/40">{morphologyLabel(candidate)}</p>
                     <p className="mt-2 line-clamp-2 text-xs leading-5 text-ink/65">{candidate.meaning}</p>
-                    <button type="button" onClick={() => { setSentencePopover(null); void search(candidate.lemma); }} className="mt-3 w-full bg-ink px-4 py-2.5 text-xs font-bold text-white transition hover:bg-moss">자세히 보기 →</button>
+                    <button type="button" onClick={() => { setSentencePopover(null); void search(candidate.surfaceForm); }} className="mt-3 w-full bg-ink px-4 py-2.5 text-xs font-bold text-white transition hover:bg-moss">자세히 보기 →</button>
                   </article>
                 ))
               ) : (

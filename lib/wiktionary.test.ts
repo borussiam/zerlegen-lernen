@@ -150,7 +150,7 @@ describe("parseGermanWiktionaryInflectionsHtml", () => {
       <div class="mw-heading mw-heading3"><h3>Verb</h3></div>
       <p class="headword-line">bitten (class 5 strong, third-person singular present bittet, past tense bat, past participle gebeten, auxiliary haben)</p>
       <div class="mw-heading mw-heading4"><h4>Conjugation</h4></div>
-      <table>
+      <table class="inflection-table">
         <tr><th>present</th><td>ich bitte</td><td>wir bitten</td><td>du bittest</td><td>ihr bittet</td><td>er bittet</td><td>sie bitten</td></tr>
       </table>
     `);
@@ -159,6 +159,57 @@ describe("parseGermanWiktionaryInflectionsHtml", () => {
 
     expect(surfaces).toEqual(expect.arrayContaining(["bitte", "bittest", "bittet", "bat", "gebeten"]));
     expect(surfaces).not.toEqual(expect.arrayContaining(["bittst", "bittt"]));
+  });
+
+  it("strips linked leading subject pronouns from verb table cells", () => {
+    const html = entryHtml(`
+      <div class="mw-heading mw-heading3"><h3>Verb</h3></div>
+      <p class="headword-line">fasen (weak, third-person singular present fast, past tense faste, past participle gefast, auxiliary haben)</p>
+      <div class="mw-heading mw-heading4"><h4>Conjugation</h4></div>
+      <table class="inflection-table">
+        <tr>
+          <th>present</th>
+          <td><span lang="de">ich</span> <span lang="de">fase</span></td>
+          <td><span lang="de">du</span> <span lang="de">fast</span></td>
+          <td><span lang="de">er/sie/es</span> <span lang="de">fast</span></td>
+          <td><span lang="de">man</span> <span lang="de">fase</span></td>
+        </tr>
+      </table>
+    `);
+
+    const surfaces = parseGermanWiktionaryInflectionsHtml("fasen", html).map((item) => item.surfaceForm);
+
+    expect(surfaces).toEqual(expect.arrayContaining(["fase", "fast", "faste", "gefast"]));
+    expect(surfaces).not.toEqual(expect.arrayContaining(["ich", "du", "er", "sie", "es", "man"]));
+  });
+
+  it("strips linked leading articles from noun and adjective declension cells", () => {
+    const nounHtml = entryHtml(`
+      <div class="mw-heading mw-heading3"><h3>Noun</h3></div>
+      <p class="headword-line"><span class="gender"><abbr>m</abbr></span></p>
+      <div class="mw-heading mw-heading4"><h4>Declension</h4></div>
+      <table class="inflection-table">
+        <tr><th>genitive singular</th><td><span lang="de">des</span> <span lang="de">Kranken</span></td></tr>
+        <tr><th>dative plural</th><td><span lang="de">den</span> <span lang="de">Kranken</span></td></tr>
+      </table>
+    `);
+    const adjectiveHtml = entryHtml(`
+      <div class="mw-heading mw-heading3"><h3>Adjective</h3></div>
+      <p class="headword-line">angehörig</p>
+      <div class="mw-heading mw-heading4"><h4>Declension</h4></div>
+      <table class="inflection-table">
+        <tr><th>nominative plural</th><td><span lang="de">die</span> <span lang="de">Angehörigen</span></td></tr>
+        <tr><th>dative singular</th><td><span lang="de">einem</span> <span lang="de">Angehörigen</span></td></tr>
+      </table>
+    `);
+
+    const surfaces = [
+      ...parseGermanWiktionaryInflectionsHtml("Kranker", nounHtml).map((item) => item.surfaceForm),
+      ...parseGermanWiktionaryInflectionsHtml("angehörig", adjectiveHtml).map((item) => item.surfaceForm),
+    ];
+
+    expect(surfaces).toEqual(expect.arrayContaining(["Kranken", "Angehörigen"]));
+    expect(surfaces).not.toEqual(expect.arrayContaining(["der", "die", "das", "des", "dem", "den", "einem"]));
   });
 
   it("keeps present-tense person metadata from modern conjugation table classes", () => {

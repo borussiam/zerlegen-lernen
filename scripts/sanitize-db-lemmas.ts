@@ -57,7 +57,7 @@ async function main() {
   const databaseUrl = process.env.DATABASE_URL?.trim();
   if (!databaseUrl) throw new Error("DATABASE_URL을 .env.local 또는 실행 환경에 설정해 주세요.");
 
-  const dryRun = process.argv.includes("--dry-run");
+const dryRun = process.argv.includes("--dry-run");
   const limit = Number(argValue("limit", "0"));
   const sql = neon(databaseUrl);
   const query: RuntimeVocabularyQuery = (statement, parameters = []) => (
@@ -72,7 +72,7 @@ async function main() {
        using lemmas
        where lemmas.lemma_id = inflection_surface_forms.lemma_id
          and inflection_surface_forms.source = 'wiktionary-inflection'
-         and coalesce(lemmas.part_of_speech, '') ~* 'pronoun'
+         and coalesce(lemmas.part_of_speech, '') ~* '\\mpronoun\\M'
          and inflection_surface_forms.morphology->>'partOfSpeech' = 'noun'
        returning inflection_surface_forms.id`,
     );
@@ -83,7 +83,7 @@ async function main() {
        using lemmas
        where lemmas.lemma_id = inflection_surface_forms.lemma_id
          and inflection_surface_forms.source = 'wiktionary-inflection'
-         and coalesce(lemmas.part_of_speech, '') ~* 'verb'
+         and coalesce(lemmas.part_of_speech, '') ~* '\\mverb\\M'
          and inflection_surface_forms.morphology->>'partOfSpeech' = 'verb'
          and not (inflection_surface_forms.morphology ? 'tense')
          and not (inflection_surface_forms.morphology ? 'person')
@@ -91,6 +91,65 @@ async function main() {
        returning inflection_surface_forms.id`,
     );
     console.log(`Removed ${staleVerbRows.length} weakly-typed verb surface row(s).`);
+
+    const dirtyVerbPronounRows = await query(
+      `delete from inflection_surface_forms
+       using lemmas
+       where lemmas.lemma_id = inflection_surface_forms.lemma_id
+         and coalesce(lemmas.part_of_speech, '') ~* '\\mverb\\M'
+         and lower(inflection_surface_forms.surface_form) = any($1::text[])
+       returning inflection_surface_forms.id`,
+      [["ich", "du", "er", "sie", "es", "wir", "ihr", "man"]],
+    );
+    console.log(`Removed ${dirtyVerbPronounRows.length} verb surface row(s) polluted by subject pronouns.`);
+
+    const dirtyNominalArticleRows = await query(
+      `delete from inflection_surface_forms
+       using lemmas
+       where lemmas.lemma_id = inflection_surface_forms.lemma_id
+         and lower(inflection_surface_forms.surface_form) = any($1::text[])
+         and coalesce(lemmas.part_of_speech, '') ~* '\\m(noun|adjective)\\M'
+       returning inflection_surface_forms.id`,
+      [["der", "die", "das", "des", "dem", "den", "ein", "eine", "eines", "einem", "einen", "einer"]],
+    );
+    console.log(`Removed ${dirtyNominalArticleRows.length} nominal surface row(s) polluted by leading articles.`);
+
+    const dirtyPhraseSurfaceRows = await query(
+      `delete from inflection_surface_forms
+       using lemmas
+       where lemmas.lemma_id = inflection_surface_forms.lemma_id
+         and inflection_surface_forms.surface_form !~ '\\s'
+         and lemmas.headword ~ '\\s'
+         and (
+           lemmas.result is null
+           or jsonb_array_length(coalesce(lemmas.result->'meanings', '[]'::jsonb)) = 0
+           or not exists (
+             select 1
+             from jsonb_array_elements_text(coalesce(lemmas.result->'meanings', '[]'::jsonb)) as meaning(value)
+             where btrim(meaning.value) <> ''
+               and meaning.value <> '사전에서 정의를 자동 추출하지 못했습니다.'
+           )
+         )
+       returning inflection_surface_forms.id`,
+    );
+    console.log(`Removed ${dirtyPhraseSurfaceRows.length} single-token surface row(s) mapped to unresolved phrase lemmas.`);
+
+    const dirtyPhraseLemmaRows = await query(
+      `delete from lemmas
+       where headword ~ '\\s'
+         and (
+           result is null
+           or jsonb_array_length(coalesce(result->'meanings', '[]'::jsonb)) = 0
+           or not exists (
+             select 1
+             from jsonb_array_elements_text(coalesce(result->'meanings', '[]'::jsonb)) as meaning(value)
+             where btrim(meaning.value) <> ''
+               and meaning.value <> '사전에서 정의를 자동 추출하지 못했습니다.'
+           )
+         )
+       returning lemma_id`,
+    );
+    console.log(`Removed ${dirtyPhraseLemmaRows.length} unresolved phrase lemma row(s).`);
   }
 
   const rows = await loadContaminatedRows(query, limit);

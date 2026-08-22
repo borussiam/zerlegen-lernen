@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { addLearnerInflectionFromWiktionary } from "@/lib/learner-inflections";
+import { rankInflectionCandidates } from "@/lib/inflection-lookup";
 import { getStoredWord, registerParsedWord } from "@/lib/preparsed-words";
 import { getRuntimeVocabularyStore } from "@/lib/runtime-vocabulary-store";
 import type { ParseResult } from "@/lib/types";
@@ -43,7 +44,10 @@ export async function GET(request: NextRequest) {
   try {
     const store = getRuntimeVocabularyStore();
     if (store) {
-      const existingCandidates = await store.lookupInflections(word, { exactOnly: true });
+      const existingCandidates = rankInflectionCandidates([
+        ...await store.lookupInflections(word, { exactOnly: true }),
+        ...await store.lookupLemmas(word),
+      ], { surfaceForm: word });
       if (existingCandidates[0]?.dictionaryEntry) {
         return NextResponse.json({
           ...existingCandidates[0].dictionaryEntry,

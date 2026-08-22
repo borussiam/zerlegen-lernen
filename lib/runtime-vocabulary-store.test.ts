@@ -69,4 +69,20 @@ describe("runtime vocabulary store", () => {
     expect(calls[0]?.statement).not.toContain("inflection_surface_forms.surface_key = $2");
     expect(calls[0]?.statement).toContain("lemmas.headword !~ '(^-|-$)'");
   });
+
+  it("looks up standalone lemmas without requiring surface-form rows", async () => {
+    const calls: Array<{ statement: string; parameters?: readonly unknown[] }> = [];
+    const store = createRuntimeVocabularyStore(async (statement, parameters) => {
+      calls.push({ statement, parameters });
+      return [{ result }];
+    });
+
+    await expect(store.lookupLemmas("Lampe")).resolves.toMatchObject([{
+      lemma: "Lampe",
+      source: "lemma",
+      dictionaryEntry: result,
+    }]);
+    expect(calls[0]?.statement).toContain("from lemmas");
+    expect(calls[0]?.statement).toContain("where headword = $1");
+  });
 });
