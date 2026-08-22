@@ -1,7 +1,7 @@
 import { neon } from "@neondatabase/serverless";
 import { headwordKeyFor } from "./dictionary-entry";
 import { getGermanCaseCandidates } from "./german-word";
-import { candidateFromParseResult } from "./inflection-lookup";
+import { candidateFromParseResult, rankInflectionCandidates } from "./inflection-lookup";
 import { stripGermanToken } from "./german-tokenizer";
 import type { CefrLevel, InflectionCandidate, MorphologicalMetadata, ParseResult } from "./types";
 
@@ -24,6 +24,14 @@ interface InflectionRow {
   headword?: unknown;
   article?: unknown;
   part_of_speech?: unknown;
+}
+
+interface LemmaRow {
+  headword?: unknown;
+  article?: unknown;
+  part_of_speech?: unknown;
+  result?: unknown;
+  exact_case?: unknown;
 }
 
 function isCefrLevel(value: unknown): value is CefrLevel {
@@ -100,22 +108,38 @@ function inflectionCandidateFromRow(row: unknown): InflectionCandidate | null {
   };
 }
 
+function lemmaCandidateFromRow(row: unknown, surfaceForm: string): InflectionCandidate | null {
+  if (typeof row !== "object" || row === null) return null;
+  const item = row as LemmaRow;
+  const result = parseStoredResult(item.result);
+  const lemma = result?.word ?? (typeof item.headword === "string" ? item.headword : "");
+  if (!lemma) return null;
+  return candidateFromParseResult(surfaceForm, {
+    word: lemma,
+    article: result?.article ?? articleValue(item.article),
+    partOfSpeech: result?.partOfSpeech ?? (typeof item.part_of_speech === "string" ? item.part_of_speech : null),
+    meanings: result?.meanings ?? [""],
+    examples: result?.examples ?? [],
+    etymology: result?.etymology ?? null,
+    morphemes: result?.morphemes ?? [],
+    sourceUrl: result?.sourceUrl ?? "",
+    compoundHint: result?.compoundHint ?? null,
+    articleReason: result?.articleReason ?? null,
+    level: result?.level,
+    headwordKey: result?.headwordKey,
+    displayHeadword: result?.displayHeadword,
+    variants: result?.variants,
+    decompositionOptions: result?.decompositionOptions,
+    learnerInflection: result?.learnerInflection,
+  }, "lemma");
+}
+
 export function normalizeRuntimeWord(word: string) {
   return stripGermanToken(word).trim().normalize("NFC");
 }
 
 function prioritizeInflectionRows(candidates: InflectionCandidate[], sentenceInitial = false) {
-  return [...candidates].sort((left, right) => {
-    const exactDifference = Number(!left.exactCase) - Number(!right.exactCase);
-    if (exactDifference) return exactDifference;
-    if (sentenceInitial) {
-      const leftNoun = left.article !== null || left.morphology.partOfSpeech === "noun" || /noun/i.test(left.partOfSpeech ?? "");
-      const rightNoun = right.article !== null || right.morphology.partOfSpeech === "noun" || /noun/i.test(right.partOfSpeech ?? "");
-      const nounDifference = Number(leftNoun) - Number(rightNoun);
-      if (nounDifference) return nounDifference;
-    }
-    return 0;
-  });
+  return rankInflectionCandidates(candidates, { sentenceInitial });
 }
 
 export function createRuntimeVocabularyStore(query: RuntimeVocabularyQuery) {
@@ -181,7 +205,7 @@ export function createRuntimeVocabularyStore(query: RuntimeVocabularyQuery) {
            case
              when $3::boolean = true
               and lemmas.article is null
-              and coalesce(lemmas.part_of_speech, '') !~* 'noun'
+              and coalesce(lemmas.part_of_speech, '') !~* '\\mnoun\\M'
              then 0
              else 1
            end,
@@ -197,6 +221,28 @@ export function createRuntimeVocabularyStore(query: RuntimeVocabularyQuery) {
       );
       return prioritizeInflectionRows(rows.flatMap((row): InflectionCandidate[] => {
         const candidate = inflectionCandidateFromRow(row);
+        return candidate ? [candidate] : [];
+      }), options.sentenceInitial);
+    },
+
+    async lookupLemmas(surfaceForm: string, options: { sentenceInitial?: boolean } = {}) {
+      const normalized = normalizeRuntimeWord(surfaceForm);
+      const rows = await query(
+        `select
+           headword,
+           article,
+           part_of_speech,
+           result,
+           headword = $1 as exact_case
+         from lemmas
+         where headword = $1
+         order by exact_case desc,
+           updated_at desc
+         limit 12`,
+        [normalized],
+      );
+      return prioritizeInflectionRows(rows.flatMap((row): InflectionCandidate[] => {
+        const candidate = lemmaCandidateFromRow(row, normalized);
         return candidate ? [candidate] : [];
       }), options.sentenceInitial);
     },

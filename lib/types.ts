@@ -57,7 +57,7 @@ export type MorphologicalPartOfSpeech =
 
 export interface MorphologicalMetadata {
   partOfSpeech: MorphologicalPartOfSpeech;
-  case?: "nominative" | "accusative" | "dative" | "genitive";
+  case?: "nominative" | "accusative" | "dative" | "genitive" | "Nominativ" | "Akkusativ" | "Dativ" | "Genitiv";
   tense?: "present" | "preterite" | "perfect" | "past-participle";
   mood?: "indicative" | "imperative" | "subjunctive-i" | "subjunctive-ii";
   person?: "1" | "2" | "3";
@@ -68,10 +68,12 @@ export interface MorphologicalMetadata {
   separablePrefix?: string;
   auxiliary?: "haben" | "sein";
   register?: "informal" | "formal";
-  contraction?: {
+  contraction?: true | {
     preposition: string;
     article: "der" | "das" | "dem";
   };
+  preposition?: string;
+  article?: "der" | "das" | "dem";
 }
 
 export interface InflectionCandidate {
@@ -84,7 +86,7 @@ export interface InflectionCandidate {
   dictionaryEntry?: ParseResult;
   morphology: MorphologicalMetadata;
   exactCase: boolean;
-  source: "surface-map" | "dictionary" | "related-separable" | "wiktionary-inflection";
+  source: "surface-map" | "dictionary" | "lemma" | "related-separable" | "wiktionary-inflection";
 }
 
 export interface SentenceLookupResult {
@@ -143,6 +145,8 @@ export interface ParseResult {
   variants?: DictionaryVariant[];
   decompositionOptions?: DecompositionOption[];
   learnerInflection?: LearnerInflectionSummary;
+  lookupSurfaceForm?: string;
+  lookupMorphology?: MorphologicalMetadata | null;
 }
 
 export interface FavoriteWord {
